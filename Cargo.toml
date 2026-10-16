@@ -1,0 +1,11 @@
+[package]
+name = "island"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+macroquad = "0.4"
+
+# Dependências otimizadas mesmo em debug: o jogo roda fluido sem precisar de --release.
+[profile.dev.package."*"]
+opt-level = 3
