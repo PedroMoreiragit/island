@@ -17,6 +17,10 @@ pub enum ItemId {
     StonePickaxe,
     StoneHatchet,
     WoodenSpear,
+    WoodenClub,
+    Slingshot,
+    Narcotic,
+    RaptorSaddle,
     Campfire,
     Workbench,
     StorageBox,
@@ -41,7 +45,7 @@ pub struct FoodEffect {
 
 impl ItemId {
     #[cfg(test)]
-    pub const ALL: [ItemId; 17] = [
+    pub const ALL: [ItemId; 21] = [
         ItemId::Wood,
         ItemId::Thatch,
         ItemId::Stone,
@@ -53,6 +57,10 @@ impl ItemId {
         ItemId::StonePickaxe,
         ItemId::StoneHatchet,
         ItemId::WoodenSpear,
+        ItemId::WoodenClub,
+        ItemId::Slingshot,
+        ItemId::Narcotic,
+        ItemId::RaptorSaddle,
         ItemId::Campfire,
         ItemId::Workbench,
         ItemId::StorageBox,
@@ -74,6 +82,10 @@ impl ItemId {
             ItemId::StonePickaxe => "Picareta de Pedra",
             ItemId::StoneHatchet => "Machado de Pedra",
             ItemId::WoodenSpear => "Lança de Madeira",
+            ItemId::WoodenClub => "Clava de Madeira",
+            ItemId::Slingshot => "Estilingue",
+            ItemId::Narcotic => "Narcótico",
+            ItemId::RaptorSaddle => "Sela de Raptor",
             ItemId::Campfire => "Fogueira",
             ItemId::Workbench => "Bancada",
             ItemId::StorageBox => "Caixa de Armazenamento",
@@ -87,9 +99,15 @@ impl ItemId {
         match self {
             ItemId::Wood | ItemId::Thatch | ItemId::Stone | ItemId::Flint | ItemId::Berry | ItemId::Hide => 100,
             ItemId::RawMeat | ItemId::CookedMeat => 40,
+            ItemId::Narcotic => 50,
+            ItemId::RaptorSaddle => 1,
             ItemId::Campfire | ItemId::Workbench | ItemId::StorageBox => 5,
             ItemId::WoodFoundation | ItemId::WoodWall | ItemId::WoodDoor => 20,
-            ItemId::StonePickaxe | ItemId::StoneHatchet | ItemId::WoodenSpear => 1,
+            ItemId::StonePickaxe
+            | ItemId::StoneHatchet
+            | ItemId::WoodenSpear
+            | ItemId::WoodenClub
+            | ItemId::Slingshot => 1,
         }
     }
 
@@ -120,6 +138,8 @@ impl ItemId {
         match self {
             ItemId::StonePickaxe | ItemId::StoneHatchet => Some(100),
             ItemId::WoodenSpear => Some(50),
+            ItemId::WoodenClub => Some(60),
+            ItemId::Slingshot => Some(80),
             _ => None,
         }
     }
@@ -141,7 +161,17 @@ impl ItemId {
             Some(ItemId::WoodenSpear) => 22.0,
             Some(ItemId::StoneHatchet) => 12.0,
             Some(ItemId::StonePickaxe) => 10.0,
+            Some(ItemId::WoodenClub) => 3.0,
             _ => 6.0,
+        }
+    }
+
+    /// Torpor (atordoamento) causado por golpe corpo a corpo. Clava é feita para derrubar.
+    pub fn melee_torpor(item: Option<ItemId>) -> f32 {
+        match item {
+            Some(ItemId::WoodenClub) => 15.0,
+            None => 2.0,
+            _ => 0.0,
         }
     }
 

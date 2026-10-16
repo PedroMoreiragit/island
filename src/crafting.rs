@@ -47,6 +47,27 @@ pub const RECIPES: &[Recipe] = &[
         station: None,
     },
     Recipe {
+        output: ItemId::WoodenClub,
+        count: 1,
+        inputs: &[(ItemId::Wood, 8), (ItemId::Thatch, 10)],
+        secs: 2.0,
+        station: None,
+    },
+    Recipe {
+        output: ItemId::Slingshot,
+        count: 1,
+        inputs: &[(ItemId::Wood, 5), (ItemId::Thatch, 10), (ItemId::Hide, 2)],
+        secs: 3.0,
+        station: None,
+    },
+    Recipe {
+        output: ItemId::Narcotic,
+        count: 1,
+        inputs: &[(ItemId::Berry, 6), (ItemId::RawMeat, 1)],
+        secs: 3.0,
+        station: None,
+    },
+    Recipe {
         output: ItemId::Campfire,
         count: 1,
         inputs: &[
@@ -91,6 +112,13 @@ pub const RECIPES: &[Recipe] = &[
         count: 1,
         inputs: &[(ItemId::Wood, 5), (ItemId::Thatch, 3)],
         secs: 2.0,
+        station: BENCH,
+    },
+    Recipe {
+        output: ItemId::RaptorSaddle,
+        count: 1,
+        inputs: &[(ItemId::Hide, 20), (ItemId::Thatch, 20), (ItemId::Wood, 10)],
+        secs: 6.0,
         station: BENCH,
     },
 ];

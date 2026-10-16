@@ -4,7 +4,8 @@
 use macroquad::prelude::*;
 
 use crate::building::{self, Structure, StructureKind};
-use crate::creatures::{Creature, Species, State};
+use crate::combat::Projectile;
+use crate::creatures::{Creature, Species, State, Temperament};
 use crate::items::ItemId;
 use crate::player::{Player, SWING_TIME};
 use crate::rng::hash2;
@@ -114,19 +115,43 @@ enum Drawable<'a> {
     Player(&'a Player),
 }
 
-/// Desenha nós e jogador ordenados por Y (quem está mais "embaixo" fica na frente).
-pub fn draw_entities(
-    world: &World,
-    creatures: &[Creature],
-    // `None` enquanto o jogador está morto.
-    player: Option<&Player>,
-    held: Option<ItemId>,
-    // Anel de destaque do alvo atual: (posição, raio).
-    ring: Option<(Vec2, f32)>,
-    view: Rect,
-    time: f32,
-) {
-    if let Some((pos, r)) = ring {
+/// Tudo o que aparece no mundo (y-sort) num frame.
+pub struct Scene<'a> {
+    pub world: &'a World,
+    pub creatures: &'a [Creature],
+    pub projectiles: &'a [Projectile],
+    /// `None` enquanto o jogador está morto.
+    pub player: Option<&'a Player>,
+    pub held: Option<ItemId>,
+    /// `id` da criatura que o jogador está montando.
+    pub mount: Option<u32>,
+    /// Anel de destaque do alvo atual: (posição, raio).
+    pub ring: Option<(Vec2, f32)>,
+    pub view: Rect,
+    pub time: f32,
+}
+
+/// Altura da sela acima do chão, para desenhar o jogador montado.
+fn saddle_height(species: Species) -> f32 {
+    match species {
+        Species::Raptor => 16.0,
+        _ => 10.0,
+    }
+}
+
+/// Desenha nós, estruturas, criaturas e jogador ordenados por Y (quem está mais "embaixo" fica na frente).
+pub fn draw_entities(scene: &Scene) {
+    let Scene {
+        world,
+        creatures,
+        player,
+        held,
+        mount,
+        view,
+        time,
+        ..
+    } = *scene;
+    if let Some((pos, r)) = scene.ring {
         draw_ellipse_lines(pos.x, pos.y, r, r * 0.45, 0.0, 1.5, Color::new(1.0, 1.0, 1.0, 0.7));
     }
 
@@ -164,7 +189,8 @@ pub fn draw_entities(
             .filter(|c| culled.contains(c.pos))
             .map(|c| (c.pos.y, Drawable::Creature(c))),
     );
-    if let Some(p) = player {
+    // Montado, o jogador é desenhado junto da montaria (logo depois dela).
+    if let Some(p) = player.filter(|_| mount.is_none()) {
         list.push((p.pos.y, Drawable::Player(p)));
     }
     list.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -174,9 +200,22 @@ pub fn draw_entities(
             Drawable::Node(n) => draw_node(n, player_pos),
             Drawable::Bag(b) => draw_bag(b, time),
             Drawable::Structure(s) => draw_structure(s, time),
-            Drawable::Creature(c) => draw_creature(c),
-            Drawable::Player(p) => draw_player(p, held),
+            Drawable::Creature(c) => {
+                draw_creature(c, time);
+                if mount == Some(c.id)
+                    && let Some(p) = player
+                {
+                    draw_player(p, held, saddle_height(c.species));
+                }
+            }
+            Drawable::Player(p) => draw_player(p, held, 0.0),
         }
+    }
+
+    for stone in scene.projectiles {
+        let (x, y) = (stone.pos.x, stone.pos.y);
+        draw_ellipse(x, y, 2.5, 1.0, 0.0, SHADOW);
+        draw_circle(x, y - 14.0, 2.2, Color::from_rgba(150, 150, 158, 255));
     }
 }
 
@@ -546,10 +585,16 @@ fn draw_pebbles(pos: Vec2, variant: u8) {
     }
 }
 
-fn draw_player(p: &Player, held: Option<ItemId>) {
+/// `seat`: altura da sela quando montado (0 = a pé).
+fn draw_player(p: &Player, held: Option<ItemId>, seat: f32) {
     let s = p.facing.sign();
-    let (x, y) = (p.pos.x, p.pos.y);
-    let step = if p.moving { (p.anim_time * 12.0).sin() } else { 0.0 };
+    let mounted = seat > 0.0;
+    let (x, y) = (p.pos.x, p.pos.y - seat);
+    let step = if p.moving && !mounted {
+        (p.anim_time * 12.0).sin()
+    } else {
+        0.0
+    };
     let bob = step.abs() * -1.5;
 
     let skin = Color::from_rgba(232, 186, 146, 255);
@@ -557,10 +602,15 @@ fn draw_player(p: &Player, held: Option<ItemId>) {
     let pants = Color::from_rgba(70, 64, 92, 255);
     let hair = Color::from_rgba(78, 50, 34, 255);
 
-    draw_ellipse(x, y, 9.0, 3.5, 0.0, SHADOW);
-    // Pernas
-    draw_rectangle(x - 5.0 + step * 2.0, y - 9.0, 4.0, 9.0, pants);
-    draw_rectangle(x + 1.0 - step * 2.0, y - 9.0, 4.0, 9.0, pants);
+    if mounted {
+        // Pernas abertas sobre a sela.
+        draw_rectangle(x - 7.0, y - 9.0, 4.0, 10.0, pants);
+        draw_rectangle(x + 3.0, y - 9.0, 4.0, 10.0, pants);
+    } else {
+        draw_ellipse(x, y, 9.0, 3.5, 0.0, SHADOW);
+        draw_rectangle(x - 5.0 + step * 2.0, y - 9.0, 4.0, 9.0, pants);
+        draw_rectangle(x + 1.0 - step * 2.0, y - 9.0, 4.0, 9.0, pants);
+    }
     // Tronco
     draw_rectangle(x - 6.0, y - 22.0 + bob, 12.0, 14.0, shirt);
     // Cabeça
@@ -602,6 +652,19 @@ fn draw_held_item(item: ItemId, hand: Vec2, dir: Vec2) {
             draw_line(hand.x, hand.y, tip.x, tip.y, 2.0, wood);
             let head = tip - dir * 2.0 + perp * 3.0;
             draw_circle(head.x, head.y, 4.0, stone);
+        }
+        ItemId::WoodenClub => {
+            let tip = hand + dir * 12.0;
+            draw_line(hand.x, hand.y, tip.x, tip.y, 2.5, wood);
+            draw_circle(tip.x, tip.y, 3.5, wood);
+        }
+        ItemId::Slingshot => {
+            let fork = hand + dir * 6.0;
+            draw_line(hand.x, hand.y, fork.x, fork.y, 2.0, wood);
+            for side in [-1.0, 1.0] {
+                let prong = fork + dir * 4.0 + perp * 3.0 * side;
+                draw_line(fork.x, fork.y, prong.x, prong.y, 1.5, wood);
+            }
         }
         ItemId::WoodenSpear => {
             let (back, tip) = (hand - dir * 8.0, hand + dir * 20.0);
@@ -666,16 +729,31 @@ fn hurt_tint(c: Color, hurt: f32) -> Color {
     Color::new(c.r + (1.0 - c.r) * t, c.g * (1.0 - t), c.b * (1.0 - t), c.a)
 }
 
-fn draw_creature(c: &Creature) {
+fn draw_creature(c: &Creature, time: f32) {
     let s = if c.facing_left { -1.0 } else { 1.0 };
     let lunge = (c.lunge / 0.25) * 6.0 * s;
     let pos = c.pos + vec2(lunge, 0.0);
     let step = if c.moving { (c.anim_time * 9.0).sin() } else { 0.0 };
     let r = c.species.radius();
     draw_ellipse(pos.x, pos.y, r + 3.0, 4.0, 0.0, SHADOW);
-    if !c.is_alive() {
-        draw_corpse(c.species, pos, s);
+    if !c.is_alive() || c.knocked_out {
+        draw_lying(c.species, pos, s, c.knocked_out);
+        if c.knocked_out {
+            // "z" subindo devagar.
+            for i in 0..3 {
+                let t = (time * 0.6 + i as f32 / 3.0).fract();
+                let zx = pos.x + s * (4.0 + t * 8.0);
+                let zy = pos.y - 12.0 - t * 18.0;
+                let size = 10.0 + t * 6.0;
+                draw_text("z", zx, zy, size, Color::new(1.0, 1.0, 1.0, 1.0 - t));
+            }
+        }
         return;
+    }
+    if c.is_tamed() {
+        // Marcador de domesticado: losango verde acima da cabeça.
+        let top = vec2(pos.x, pos.y - r * 2.8 - 2.0);
+        draw_poly(top.x, top.y, 4, 3.0, 45.0, Color::new(0.4, 0.95, 0.5, 0.9));
     }
     let tint = |col| hurt_tint(col, c.hurt);
     match c.species {
@@ -699,6 +777,18 @@ fn draw_creature(c: &Creature) {
             tint(Color::from_rgba(176, 110, 60, 255)),
             tint(Color::from_rgba(110, 64, 34, 255)),
         ),
+    }
+    if c.can_ride() {
+        let k = 1.1;
+        let (x, y) = (pos.x, pos.y);
+        draw_rectangle(
+            x - 6.0 * k,
+            y - 21.0 * k,
+            12.0 * k,
+            5.0 * k,
+            Color::from_rgba(96, 60, 32, 255),
+        );
+        draw_line(x, y - 16.0 * k, x, y - 10.0 * k, 1.5, Color::from_rgba(70, 44, 24, 255));
     }
 }
 
@@ -790,7 +880,8 @@ fn draw_theropod(pos: Vec2, s: f32, step: f32, scale: f32, crest: bool, body: Co
     draw_line(x + 7.0 * k * s, y - 13.0 * k, x + 10.0 * k * s, y - 10.0 * k, 1.5, dark);
 }
 
-fn draw_corpse(species: Species, pos: Vec2, s: f32) {
+/// Criatura deitada: morta (olho em X) ou desmaiada (olho fechado).
+fn draw_lying(species: Species, pos: Vec2, s: f32, asleep: bool) {
     let (x, y) = (pos.x, pos.y);
     let col = match species {
         Species::Dodo => Color::from_rgba(120, 104, 92, 255),
@@ -806,30 +897,57 @@ fn draw_corpse(species: Species, pos: Vec2, s: f32) {
         draw_line(lx, y - 6.0, lx + 1.5 * i, y - 6.0 - r * 0.6, 1.5, col);
     }
     let ex = x + r * 0.7 * s;
-    draw_line(ex - 1.5, y - 7.0, ex + 1.5, y - 4.0, 1.0, BLACK);
-    draw_line(ex - 1.5, y - 4.0, ex + 1.5, y - 7.0, 1.0, BLACK);
+    if asleep {
+        draw_line(ex - 1.5, y - 5.5, ex + 1.5, y - 5.5, 1.0, BLACK);
+    } else {
+        draw_line(ex - 1.5, y - 7.0, ex + 1.5, y - 4.0, 1.0, BLACK);
+        draw_line(ex - 1.5, y - 4.0, ex + 1.5, y - 7.0, 1.0, BLACK);
+    }
 }
 
-/// Barras de vida (espaço de tela) para criaturas feridas ou em perseguição.
-pub fn draw_creature_bars(creatures: &[Creature], camera: &Camera2D) {
-    for c in creatures.iter().filter(|c| c.is_alive()) {
+/// Barras (espaço de tela) de criaturas feridas, atordoadas, perseguindo ou domesticadas.
+/// `skip`: id da montaria (a barra dela fica no HUD).
+pub fn draw_creature_bars(creatures: &[Creature], camera: &Camera2D, skip: Option<u32>) {
+    for c in creatures.iter().filter(|c| c.is_alive() && Some(c.id) != skip) {
         let hurt = c.health_frac() < 1.0;
-        if !hurt && c.state != State::Chase {
+        let dazed = c.torpor > 0.0;
+        let chasing = c.is_wild() && c.state == State::Chase;
+        if !hurt && !dazed && !chasing && !c.is_tamed() {
             continue;
         }
-        let top = c.pos - vec2(0.0, c.species.radius() * 2.8 + 8.0);
+        let lift = if c.knocked_out { 1.4 } else { 2.8 };
+        let top = c.pos - vec2(0.0, c.species.radius() * lift + 10.0);
         let at = camera.world_to_screen(top);
-        let (w, h) = (40.0, 5.0);
+        let (w, h) = (44.0, 5.0);
         draw_rectangle(at.x - w / 2.0, at.y, w, h, Color::new(0.0, 0.0, 0.0, 0.6));
-        let color = match c.species.temperament() {
-            crate::creatures::Temperament::Aggressive => Color::new(0.9, 0.25, 0.2, 1.0),
-            crate::creatures::Temperament::Passive => Color::new(0.4, 0.85, 0.4, 1.0),
+        let color = match (c.is_tamed(), c.species.temperament()) {
+            (true, _) => Color::new(0.4, 0.85, 0.4, 1.0),
+            (false, Temperament::Aggressive) => Color::new(0.9, 0.25, 0.2, 1.0),
+            (false, Temperament::Passive) => Color::new(0.85, 0.75, 0.35, 1.0),
         };
         draw_rectangle(at.x - w / 2.0, at.y, w * c.health_frac(), h, color);
-        if c.state == State::Chase {
-            let name = c.species.name();
-            let tw = measure_text(name, None, 16, 1.0).width;
-            draw_text(name, at.x - tw / 2.0, at.y - 3.0, 16.0, Color::new(1.0, 0.8, 0.75, 1.0));
+        if dazed {
+            draw_rectangle(at.x - w / 2.0, at.y + h + 1.0, w, 3.0, Color::new(0.0, 0.0, 0.0, 0.6));
+            let purple = Color::new(0.65, 0.4, 0.95, 1.0);
+            draw_rectangle(at.x - w / 2.0, at.y + h + 1.0, w * c.torpor_frac(), 3.0, purple);
         }
+        let mut name = format!("{} Nv {}", c.species.name(), c.level);
+        if c.knocked_out {
+            name.push_str(" (desacordado)");
+        }
+        let name_color = if c.is_tamed() {
+            Color::new(0.6, 1.0, 0.65, 1.0)
+        } else {
+            Color::new(1.0, 0.85, 0.8, 1.0)
+        };
+        let tw = measure_text(&name, None, 16, 1.0).width;
+        draw_text(
+            &name,
+            at.x - tw / 2.0 + 1.0,
+            at.y - 2.0,
+            16.0,
+            Color::new(0.0, 0.0, 0.0, 0.7),
+        );
+        draw_text(&name, at.x - tw / 2.0, at.y - 3.0, 16.0, name_color);
     }
 }

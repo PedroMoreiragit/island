@@ -5,9 +5,11 @@ use macroquad::prelude::*;
 
 use crate::building::{COOK_SECS, Structure, StructureKind};
 use crate::crafting::{self, CraftQueue, MAX_QUEUE, RECIPES, Recipe};
+use crate::creatures::{Command, Creature};
 use crate::daynight;
 use crate::inventory::{HOTBAR_SIZE, Inventory, Stack};
 use crate::items::ItemId;
+use crate::taming;
 use crate::vitals::{MAX_FOOD, MAX_HEALTH, MAX_STAMINA, MAX_WATER, Vitals};
 
 const SLOT: f32 = 52.0;
@@ -33,11 +35,83 @@ pub struct UiState {
     pub inventory_open: bool,
     /// Pilha "presa" ao cursor enquanto o jogador reorganiza o inventário.
     pub held: Option<Stack>,
-    /// Índice (em `world.structures`) do contêiner (baú, fogueira) aberto junto com o inventário.
-    pub container: Option<usize>,
+    /// Contêiner (baú, fogueira, dino) aberto junto com o inventário.
+    pub container: Option<ContainerRef>,
     pub hide_help: bool,
 }
 
+/// O que está aberto ao lado do inventário.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerRef {
+    /// Índice em `world.structures`.
+    Structure(usize),
+    /// `id` da criatura.
+    Creature(u32),
+}
+
+/// Tipo de painel de contêiner: define layout e botões.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelKind {
+    Storage,
+    Campfire,
+    /// Dino desacordado sendo domesticado.
+    Taming,
+    /// Dino domesticado.
+    Tamed,
+}
+
+impl PanelKind {
+    /// Altura extra abaixo dos slots (status, barras, botões).
+    fn extra_height(self) -> f32 {
+        match self {
+            PanelKind::Storage => 0.0,
+            PanelKind::Campfire => 84.0,
+            PanelKind::Taming | PanelKind::Tamed => 112.0,
+        }
+    }
+
+    fn buttons(self) -> &'static [UiAction] {
+        match self {
+            PanelKind::Campfire => &[UiAction::ToggleFire],
+            PanelKind::Tamed => &[UiAction::ToggleCommand, UiAction::Mount],
+            PanelKind::Storage | PanelKind::Taming => &[],
+        }
+    }
+}
+
+/// Leitura do contêiner aberto, para desenhar o painel.
+#[derive(Clone, Copy)]
+pub enum ContainerView<'a> {
+    Structure(&'a Structure),
+    Creature(&'a Creature),
+}
+
+impl<'a> ContainerView<'a> {
+    fn kind(self) -> PanelKind {
+        match self {
+            ContainerView::Structure(s) if s.kind == StructureKind::Campfire => PanelKind::Campfire,
+            ContainerView::Structure(_) => PanelKind::Storage,
+            ContainerView::Creature(c) if c.is_tamed() => PanelKind::Tamed,
+            ContainerView::Creature(_) => PanelKind::Taming,
+        }
+    }
+
+    fn inventory(self) -> Option<&'a Inventory> {
+        match self {
+            ContainerView::Structure(s) => s.storage.as_ref(),
+            ContainerView::Creature(c) => c.inventory.as_ref(),
+        }
+    }
+
+    fn title(self) -> String {
+        match self {
+            ContainerView::Structure(s) => s.kind.item().name().to_owned(),
+            ContainerView::Creature(c) => format!("{} Nv {}", c.species.name(), c.level),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiAction {
     Craft(usize),
     CancelCraft(usize),
@@ -46,13 +120,19 @@ pub enum UiAction {
     Drop(Stack),
     /// Acender/apagar a fogueira aberta.
     ToggleFire,
+    /// Alternar seguir/ficar do dino aberto.
+    ToggleCommand,
+    /// Montar no dino aberto.
+    Mount,
 }
 
 /// Tudo o que o HUD precisa ler do jogo.
 pub struct Hud<'a> {
     pub ui: &'a UiState,
     pub inventory: &'a Inventory,
-    pub container: Option<&'a Structure>,
+    pub container: Option<ContainerView<'a>>,
+    /// Montaria atual, para a barra de vida dela.
+    pub mount: Option<&'a Creature>,
     /// Flash vermelho de dano recebido (s restantes).
     pub hurt: f32,
     pub queue: &'a CraftQueue,
@@ -75,8 +155,10 @@ enum RightLayout {
     },
     Container {
         slots: Vec<Rect>,
-        /// Botão de acender/apagar (só fogueira).
-        fire_button: Option<Rect>,
+        /// Área abaixo dos slots para status/barras.
+        info: Rect,
+        /// Botões, na ordem de `PanelKind::buttons`.
+        buttons: Vec<Rect>,
     },
 }
 
@@ -100,16 +182,13 @@ fn grid_height(n: usize, cols: usize, size: f32) -> f32 {
     n.div_ceil(cols) as f32 * (size + GAP) - GAP
 }
 
-/// Altura extra do painel da fogueira (status + botão).
-const FIRE_EXTRA: f32 = 84.0;
-
-/// `container`: (slots, é fogueira) do contêiner aberto, se houver (substitui o painel de crafting).
-fn panel_layout(n_slots: usize, container: Option<(usize, bool)>, queue_len: usize) -> PanelLayout {
+/// `container`: (slots, tipo) do contêiner aberto, se houver (substitui o painel de crafting).
+fn panel_layout(n_slots: usize, container: Option<(usize, PanelKind)>, queue_len: usize) -> PanelLayout {
     let grid_w = COLS as f32 * (SLOT + GAP) - GAP;
     let inv_w = grid_w + PAD * 2.0;
     let inv_h = HEADER + PAD * 2.0 + grid_height(n_slots, COLS, SLOT) + 8.0;
     let right_h = match container {
-        Some((n, fire)) => HEADER + PAD * 2.0 + grid_height(n, COLS, SLOT) + 24.0 + if fire { FIRE_EXTRA } else { 0.0 },
+        Some((n, kind)) => HEADER + PAD * 2.0 + grid_height(n, COLS, SLOT) + 24.0 + kind.extra_height(),
         None => {
             HEADER + PAD * 2.0 + grid_height(RECIPES.len(), COLS, SLOT) + DETAIL_H + 24.0 + 22.0 + SMALL_SLOT + 48.0
         }
@@ -127,13 +206,14 @@ fn panel_layout(n_slots: usize, container: Option<(usize, bool)>, queue_len: usi
     let rx = x0 + inv_w + 16.0;
     let top = vec2(rx + PAD, y0 + HEADER + PAD);
     let right = match container {
-        Some((n, fire)) => {
+        Some((n, kind)) => {
             let slots = grid(top, n, COLS, SLOT);
-            let below = top.y + grid_height(n, COLS, SLOT) + 44.0;
-            RightLayout::Container {
-                slots,
-                fire_button: fire.then(|| Rect::new(top.x, below, 120.0, 32.0)),
-            }
+            let info_y = top.y + grid_height(n, COLS, SLOT) + 8.0;
+            let info = Rect::new(top.x, info_y, RIGHT_W - PAD * 2.0, kind.extra_height());
+            let buttons = (0..kind.buttons().len())
+                .map(|i| Rect::new(top.x + i as f32 * 132.0, info.bottom() - 40.0, 120.0, 32.0))
+                .collect();
+            RightLayout::Container { slots, info, buttons }
         }
         None => {
             let recipes = grid(top, RECIPES.len(), COLS, SLOT);
@@ -182,11 +262,11 @@ pub fn return_held(ui: &mut UiState, inv: &mut Inventory) -> Option<Stack> {
 pub fn handle_input(
     ui: &mut UiState,
     inv: &mut Inventory,
-    container: Option<&mut Structure>,
+    container: Option<(PanelKind, &mut Inventory)>,
     queue: &CraftQueue,
 ) -> Option<UiAction> {
-    let is_fire = container.as_ref().is_some_and(|s| s.kind == StructureKind::Campfire);
-    let mut chest = container.and_then(|s| s.storage.as_mut());
+    let kind = container.as_ref().map(|c| c.0);
+    let mut chest = container.map(|c| c.1);
     let m = mouse();
     if !ui.inventory_open {
         if is_mouse_button_pressed(MouseButton::Left) {
@@ -200,7 +280,7 @@ pub fn handle_input(
 
     let layout = panel_layout(
         inv.slots.len(),
-        chest.as_ref().map(|c| (c.slots.len(), is_fire)),
+        chest.as_ref().zip(kind).map(|(c, k)| (c.slots.len(), k)),
         queue.jobs.len(),
     );
     let left = is_mouse_button_pressed(MouseButton::Left);
@@ -216,9 +296,12 @@ pub fn handle_input(
     }
 
     match &layout.right {
-        RightLayout::Container { slots, fire_button } => {
-            if left && fire_button.is_some_and(|b| b.contains(m)) {
-                return Some(UiAction::ToggleFire);
+        RightLayout::Container { slots, buttons, .. } => {
+            if left
+                && let Some(i) = buttons.iter().position(|b| b.contains(m))
+                && let Some(kind) = kind
+            {
+                return Some(kind.buttons()[i]);
             }
             if let (Some(chest), Some(i)) = (chest, slots.iter().position(|r| r.contains(m))) {
                 if left && shift && ui.held.is_none() {
@@ -328,12 +411,15 @@ pub fn draw(hud: &Hud) {
     }
     draw_clock(hud.time);
     draw_vitals(hud.vitals);
+    if let Some(mount) = hud.mount {
+        draw_mount_bar(mount);
+    }
     draw_messages(hud.messages);
     if hud.ui.inventory_open {
         draw_panels(hud);
     } else {
         draw_queue_hud(hud.queue);
-        draw_hotbar(hud.inventory, hud.selected);
+        draw_hotbar(hud.inventory, hud.selected, hud.mount.is_some());
     }
 }
 
@@ -446,15 +532,32 @@ fn draw_queue_hud(queue: &CraftQueue) {
     draw_rectangle(bar.x, bar.y, bar.w * progress, bar.h, ACCENT);
 }
 
-fn draw_hotbar(inv: &Inventory, selected: usize) {
+/// Vida da montaria, acima das barras do jogador.
+fn draw_mount_bar(mount: &Creature) {
+    let (x, w, h) = (16.0, 234.0, 10.0);
+    let y = screen_height() - 30.0 - 4.0 * 24.0 - 14.0;
+    let label = format!("{} Nv {}   F: desmontar", mount.species.name(), mount.level);
+    shadowed(&label, x, y - 4.0, 18.0, OK);
+    draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
+    draw_rectangle(x, y, w * mount.health_frac(), h, Color::new(0.4, 0.8, 0.4, 1.0));
+    draw_rectangle_lines(x, y, w, h, 1.0, BORDER);
+}
+
+fn draw_hotbar(inv: &Inventory, selected: usize, mounted: bool) {
     for (i, rect) in hotbar_slots().iter().enumerate() {
         draw_slot(*rect, inv.slots[i], i == selected);
         draw_text((i + 1).to_string(), rect.x + 4.0, rect.y + 14.0, 16.0, DIM);
     }
     if let Some(stack) = inv.slots[selected] {
-        let name = match stack.item.structure() {
-            Some(_) => format!("{}  (clique para posicionar)", stack.item.name()),
-            None => stack.item.name().to_owned(),
+        let name = match stack.item {
+            _ if mounted => format!("{}  (montado: E / clique morde)", stack.item.name()),
+            item if item.structure().is_some() => format!("{}  (clique para posicionar)", item.name()),
+            ItemId::Slingshot => format!(
+                "Estilingue  ({} pedras, clique mira no cursor)",
+                inv.count(ItemId::Stone)
+            ),
+            ItemId::Narcotic => "Narcótico  (coloque no inventário do dino desacordado)".to_owned(),
+            item => item.name().to_owned(),
         };
         let w = measure_text(&name, None, 20, 1.0).width;
         let y = hotbar_slots()[0].y - 8.0;
@@ -470,11 +573,10 @@ fn draw_panel(rect: Rect, title: &str) {
 
 fn draw_panels(hud: &Hud) {
     let (ui, inv) = (hud.ui, hud.inventory);
-    let storage = hud.container.and_then(|s| s.storage.as_ref());
-    let is_fire = hud.container.is_some_and(|s| s.kind == StructureKind::Campfire);
+    let storage = hud.container.and_then(|c| c.inventory());
     let layout = panel_layout(
         inv.slots.len(),
-        storage.map(|c| (c.slots.len(), is_fire)),
+        hud.container.zip(storage).map(|(c, s)| (s.slots.len(), c.kind())),
         hud.queue.jobs.len(),
     );
     let m = mouse();
@@ -502,16 +604,21 @@ fn draw_panels(hud: &Hud) {
 
     let rp = layout.right_panel;
     match (&layout.right, hud.container.zip(storage)) {
-        (RightLayout::Container { slots, fire_button }, Some((structure, chest))) => {
-            draw_panel(rp, structure.kind.item().name());
+        (RightLayout::Container { slots, info, buttons }, Some((view, chest))) => {
+            draw_panel(rp, &view.title());
             for (i, rect) in slots.iter().enumerate() {
                 draw_slot(*rect, chest.slots[i], false);
             }
             if let Some(s) = slots.iter().position(|r| r.contains(m)).and_then(|i| chest.slots[i]) {
                 tooltip = Some(stack_tooltip(&s));
             }
-            if let Some(button) = fire_button {
-                draw_fire_controls(structure, slots, *button, m);
+            match view {
+                ContainerView::Structure(fire) if view.kind() == PanelKind::Campfire => {
+                    draw_fire_controls(fire, slots, buttons[0], m);
+                }
+                ContainerView::Creature(c) if c.is_tamed() => draw_tamed_info(c, *info, buttons, m),
+                ContainerView::Creature(c) => draw_taming_info(c, *info),
+                ContainerView::Structure(_) => {}
             }
             draw_text(
                 "Shift+clique: transferir tudo",
@@ -580,22 +687,7 @@ fn draw_fire_controls(fire: &Structure, slots: &[Rect], button: Rect, m: Vec2) {
     };
     draw_text(&status, x, y, 18.0, if fire.is_lit() { ACCENT } else { DIM });
 
-    let hover = button.contains(m);
-    let bg = if hover {
-        ACCENT
-    } else {
-        Color::new(0.85, 0.65, 0.25, 1.0)
-    };
-    draw_rectangle(button.x, button.y, button.w, button.h, bg);
-    let label = if fire.active { "Apagar" } else { "Acender" };
-    let w = measure_text(label, None, 20, 1.0).width;
-    draw_text(
-        label,
-        button.x + (button.w - w) / 2.0,
-        button.y + 22.0,
-        20.0,
-        Color::new(0.1, 0.08, 0.05, 1.0),
-    );
+    draw_button(button, if fire.active { "Apagar" } else { "Acender" }, true, m);
 
     if fire.is_lit() && fire.cook > 0.0 {
         let bar = Rect::new(button.right() + 16.0, button.y + 20.0, 200.0, 6.0);
@@ -603,6 +695,96 @@ fn draw_fire_controls(fire: &Structure, slots: &[Rect], button: Rect, m: Vec2) {
         draw_rectangle(bar.x, bar.y, bar.w, bar.h, Color::new(1.0, 1.0, 1.0, 0.15));
         draw_rectangle(bar.x, bar.y, bar.w * (fire.cook / COOK_SECS).min(1.0), bar.h, OK);
     }
+}
+
+fn draw_bar(x: f32, y: f32, w: f32, label: &str, frac: f32, color: Color) {
+    draw_text(label, x, y, 16.0, TEXT);
+    draw_rectangle(x, y + 4.0, w, 7.0, Color::new(1.0, 1.0, 1.0, 0.12));
+    draw_rectangle(x, y + 4.0, w * frac.clamp(0.0, 1.0), 7.0, color);
+}
+
+fn draw_button(rect: Rect, label: &str, enabled: bool, m: Vec2) {
+    let bg = match (enabled, rect.contains(m)) {
+        (true, true) => ACCENT,
+        (true, false) => Color::new(0.85, 0.65, 0.25, 1.0),
+        _ => Color::new(1.0, 1.0, 1.0, 0.10),
+    };
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, bg);
+    let w = measure_text(label, None, 20, 1.0).width;
+    let fg = if enabled { Color::new(0.1, 0.08, 0.05, 1.0) } else { DIM };
+    draw_text(label, rect.x + (rect.w - w) / 2.0, rect.y + 22.0, 20.0, fg);
+}
+
+/// Barras de torpor e domesticação de um dino desacordado + dica de comida.
+fn draw_taming_info(c: &Creature, area: Rect) {
+    let w = area.w;
+    let torpor_label = format!("Torpor {:.0}/{:.0}", c.torpor, c.max_torpor());
+    draw_bar(
+        area.x,
+        area.y + 14.0,
+        w,
+        &torpor_label,
+        c.torpor_frac(),
+        Color::new(0.65, 0.4, 0.95, 1.0),
+    );
+    match c.taming {
+        Some(t) => {
+            let label = format!(
+                "Domesticação {:.0}%   Efetividade {:.0}%",
+                t.progress * 100.0,
+                t.effectiveness * 100.0
+            );
+            draw_bar(area.x, area.y + 44.0, w, &label, t.progress, OK);
+            let foods: Vec<&str> = taming::preferred_foods(c.species.diet())
+                .iter()
+                .map(|f| f.name())
+                .collect();
+            let hint = format!("Come: {}", foods.join(" > "));
+            draw_text(&hint, area.x, area.y + 80.0, 16.0, DIM);
+            draw_text(
+                "Narcótico o mantém dormindo. Não bata nele!",
+                area.x,
+                area.y + 98.0,
+                16.0,
+                DIM,
+            );
+        }
+        None => {
+            draw_text(
+                "Esta espécie não pode ser domesticada.",
+                area.x,
+                area.y + 50.0,
+                18.0,
+                BAD,
+            );
+        }
+    }
+}
+
+/// Vida, ordem atual e botões de um dino domesticado.
+fn draw_tamed_info(c: &Creature, area: Rect, buttons: &[Rect], m: Vec2) {
+    let label = format!("Vida {:.0}/{:.0}", c.health, c.max_health());
+    draw_bar(
+        area.x,
+        area.y + 14.0,
+        area.w,
+        &label,
+        c.health_frac(),
+        Color::new(0.4, 0.8, 0.4, 1.0),
+    );
+    let (order, toggle) = match c.command {
+        Some(Command::Stay) => ("Parado", "Seguir"),
+        _ => ("Seguindo você", "Ficar"),
+    };
+    draw_text(format!("Ordem: {order}"), area.x, area.y + 44.0, 18.0, TEXT);
+    let ride_hint = match c.species.saddle() {
+        Some(_) if c.can_ride() => "Pronto para montar.".to_owned(),
+        Some(saddle) => format!("Coloque uma {} aqui para montar.", saddle.name()),
+        None => "Esta espécie não pode ser montada.".to_owned(),
+    };
+    draw_text(&ride_hint, area.x, area.y + 64.0, 16.0, DIM);
+    draw_button(buttons[0], toggle, true, m);
+    draw_button(buttons[1], "Montar", c.can_ride(), m);
 }
 
 fn stack_tooltip(stack: &Stack) -> String {
@@ -798,6 +980,34 @@ pub fn draw_item_icon(item: ItemId, rect: Rect) {
                 p(10.0, -6.0),
                 Color::from_rgba(60, 62, 72, 255),
             );
+        }
+        ItemId::WoodenClub => {
+            line(p(-14.0, 16.0), p(6.0, -8.0), 4.0, wood);
+            let head = p(8.0, -11.0);
+            draw_circle(head.x, head.y, 8.0 * u, wood);
+            draw_circle(head.x - 2.0 * u, head.y - 2.0 * u, 3.0 * u, wood_light);
+        }
+        ItemId::Slingshot => {
+            line(p(0.0, 16.0), p(0.0, 0.0), 4.0, wood);
+            line(p(0.0, 0.0), p(-9.0, -14.0), 4.0, wood);
+            line(p(0.0, 0.0), p(9.0, -14.0), 4.0, wood);
+            line(p(-9.0, -14.0), p(0.0, -6.0), 1.5, Color::from_rgba(120, 84, 56, 255));
+            line(p(9.0, -14.0), p(0.0, -6.0), 1.5, Color::from_rgba(120, 84, 56, 255));
+            let s = p(0.0, -6.0);
+            draw_circle(s.x, s.y, 3.0 * u, stone);
+        }
+        ItemId::Narcotic => {
+            let glass = Color::from_rgba(200, 210, 220, 200);
+            rect_at(-8.0, -6.0, 16.0, 20.0, glass);
+            rect_at(-6.0, 0.0, 12.0, 12.0, Color::from_rgba(120, 60, 150, 255));
+            rect_at(-4.0, -12.0, 8.0, 6.0, wood_dark);
+        }
+        ItemId::RaptorSaddle => {
+            let leather = Color::from_rgba(120, 76, 40, 255);
+            draw_ellipse(c.x, c.y, 16.0 * u, 9.0 * u, 0.0, leather);
+            rect_at(-12.0, -8.0, 6.0, 8.0, Color::from_rgba(150, 100, 56, 255));
+            line(p(-4.0, 6.0), p(-6.0, 16.0), 2.0, wood_dark);
+            line(p(6.0, 6.0), p(8.0, 16.0), 2.0, wood_dark);
         }
         ItemId::Campfire => {
             line(p(-14.0, 12.0), p(14.0, 6.0), 6.0, wood);

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod building;
+mod combat;
 mod crafting;
 mod creatures;
 mod daynight;
@@ -13,6 +14,7 @@ mod player;
 mod render;
 mod rng;
 mod save;
+mod taming;
 mod ui;
 mod vitals;
 mod world;
@@ -60,7 +62,10 @@ async fn main() {
     // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug; ISLAND_SHOT_DEAD=1 mostra a morte;
     // ISLAND_SHOT_BUILD=1 monta uma cabana de exemplo; ISLAND_SHOT_HOUR=22 ajusta o relógio;
     // ISLAND_SHOT_CREATURES=1 coloca uma criatura de cada espécie perto do jogador;
-    // ISLAND_SHOT_FIRE=1 monta a cabana e abre o painel da fogueira.
+    // ISLAND_SHOT_FIRE=1 monta a cabana e abre o painel da fogueira;
+    // ISLAND_SHOT_TAME=1 mostra um raptor desacordado com o painel de domesticação;
+    // ISLAND_SHOT_RIDE=1 mostra o jogador montado num raptor, com um dodô domesticado e um dilo desacordado;
+    // ISLAND_SHOT_PET=1 abre o painel do raptor domesticado.
     let shot = env("ISLAND_SHOT");
     let mut game = if shot.is_some() {
         let mut game = Game::new(seed);
@@ -73,6 +78,15 @@ async fn main() {
         }
         if env("ISLAND_SHOT_BUILD").is_some() {
             game.build_demo_base();
+        }
+        if env("ISLAND_SHOT_TAME").is_some() {
+            game.demo_taming();
+        }
+        if env("ISLAND_SHOT_RIDE").is_some() {
+            game.demo_riding();
+        }
+        if env("ISLAND_SHOT_PET").is_some() {
+            game.demo_pet_panel();
         }
         if env("ISLAND_SHOT_FIRE").is_some() {
             game.build_demo_base();

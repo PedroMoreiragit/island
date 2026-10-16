@@ -33,13 +33,17 @@ Cada marco é jogável por si só. A ordem prioriza o loop central de survival a
 - Carcaças coletáveis: machado rende carne, picareta rende couro
 - Fogueira com inventário: queima madeira/palha e cozinha carne (carne crua faz mal)
 - Spawn por bioma (praia, campo, floresta), limite de população e zonas seguras (spawn e bases)
-- Ainda não: estragar comida, armaduras e itens que usam couro (selas chegam na v0.5)
+- Ainda não: estragar comida e armaduras
 
-## v0.5 — Domesticação ⭐
-- Nocaute (torpor) com estilingue/clava + narcóticos
-- Barra de domesticação alimentando o dino desacordado (efetividade como no ARK)
-- Dinos domesticados: seguir/ficar, montar (selas craftáveis), carregar inventário
-- Níveis e atributos de criaturas
+## ✅ v0.5 — Domesticação ⭐
+- Torpor e desmaio: clava (corpo a corpo) e estilingue (pedras, mira no cursor); torpor some com o tempo
+- Narcóticos no inventário do dino desacordado o mantêm dormindo
+- Domesticação alimentando o dino desacordado (herbívoros: frutinhas; carnívoros: carne crua > cozida),
+  com efetividade que cai a cada golpe e define os níveis bônus
+- Dinos domesticados: seguir/ficar, inventário de carga, regeneração de vida
+- Montaria: raptor com Sela de Raptor (feita de couro na bancada); a montaria morde e absorve o dano
+- Níveis 1–30 na natureza, escalando vida, torpor e dano
+- Ainda não: domesticados lutando sozinhos, fome/ração de domesticados, XP de criaturas
 
 ## v0.6 — Progressão RPG
 - Nível e XP do jogador, pontos de atributo

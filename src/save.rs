@@ -99,12 +99,10 @@ mod tests {
             }],
             structures: vec![Structure::new(crate::building::StructureKind::StorageBox, (1, 2))],
             craft_queue: CraftQueue::default(),
-            creatures: Some(vec![CreatureSave {
-                species: crate::creatures::Species::Raptor,
-                pos: [5.0, 6.0],
-                health: 40.0,
-                corpse: None,
-            }]),
+            creatures: Some(vec![CreatureSave::from(
+                &crate::creatures::Creature::new(crate::creatures::Species::Raptor, macroquad::math::vec2(5.0, 6.0))
+                    .with_level(3),
+            )]),
         };
         let path = std::env::temp_dir().join(format!("island-test-{}/save.json", std::process::id()));
         write(&path, &data).unwrap();
