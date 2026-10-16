@@ -6,12 +6,13 @@ use macroquad::prelude::*;
 
 use crate::building::{self, Layer, PlaceError, StructureKind};
 use crate::crafting::{CraftError, CraftQueue, RECIPES, Recipe};
+use crate::creatures::{self, AiInput, Creature, CreatureSave};
 use crate::daynight;
 use crate::gathering;
 use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, Stack};
 use crate::items::{ItemId, ToolKind};
 use crate::player::{self, Facing, Player};
-use crate::render::{self, POPUP_LIFETIME, Popup};
+use crate::render::{self, POPUP_LIFETIME, Popup, PopupStyle};
 use crate::rng::Rng;
 use crate::save::{self, BagSave, SAVE_VERSION, SaveData};
 use crate::ui::{self, UiAction, UiState};
@@ -26,6 +27,15 @@ const AUTOSAVE_SECS: f32 = 60.0;
 const PICKUP_REACH: f32 = 28.0;
 /// Luz fraca em volta do jogador para não ficar cego à noite.
 const PLAYER_LIGHT: f32 = 56.0;
+/// Intervalo entre tentativas de repor a fauna.
+const RESPAWN_SECS: f32 = 10.0;
+
+/// Alvo de um golpe (E / clique).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Target {
+    Node(usize),
+    Creature(usize),
+}
 
 /// Algo com que o jogador pode interagir com F.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,6 +52,10 @@ pub struct Game {
     inventory: Inventory,
     hotbar_selected: usize,
     queue: CraftQueue,
+    creatures: Vec<Creature>,
+    spawn_timer: f32,
+    /// Tela piscando vermelho após levar dano (s restantes).
+    hurt_flash: f32,
     ui: UiState,
     popups: Vec<Popup>,
     messages: Vec<(String, f32)>,
@@ -56,6 +70,9 @@ impl Game {
     pub fn new(seed: u64) -> Self {
         let world = World::generate(seed, MAP_SIZE, MAP_SIZE);
         let player = Player::new(world.spawn);
+        let mut rng = Rng::new(seed ^ 0xA11CE);
+        let mut creatures = Vec::new();
+        creatures::populate(&mut creatures, &world, player.pos, &mut rng, 4000);
         Self {
             camera_pos: player.pos,
             world,
@@ -65,10 +82,13 @@ impl Game {
             inventory: Inventory::new(INVENTORY_SIZE),
             hotbar_selected: 0,
             queue: CraftQueue::default(),
+            creatures,
+            spawn_timer: RESPAWN_SECS,
+            hurt_flash: 0.0,
             ui: UiState::default(),
             popups: Vec::new(),
             messages: Vec::new(),
-            rng: Rng::new(seed ^ 0xA11CE),
+            rng,
             time: 0.0,
             save_path: None,
             autosave_timer: AUTOSAVE_SECS,
@@ -105,6 +125,13 @@ impl Game {
             })
             .collect();
         game.world.structures = data.structures;
+        for s in &mut game.world.structures {
+            s.normalize();
+        }
+        // Saves anteriores à v0.4 não têm fauna: mantém a população recém-gerada.
+        if let Some(saved) = data.creatures {
+            game.creatures = saved.into_iter().map(Creature::from).collect();
+        }
         game.notify("Jogo carregado");
         game
     }
@@ -145,6 +172,7 @@ impl Game {
                 .collect(),
             structures: self.world.structures.clone(),
             craft_queue: self.queue.clone(),
+            creatures: Some(self.creatures.iter().map(CreatureSave::from).collect()),
         }
     }
 
@@ -222,8 +250,49 @@ impl Game {
         place(StructureKind::Workbench, (sx + 1, y0 + 1));
         place(StructureKind::Campfire, (sx + 2, sy));
         if let Some(i) = self.world.structure_at((sx + 2, sy), Layer::Object) {
-            self.world.structures[i].fuel = 300.0;
+            let fire = &mut self.world.structures[i];
+            if let Some(storage) = fire.storage.as_mut() {
+                storage.add(ItemId::Wood, 5);
+                storage.add(ItemId::RawMeat, 3);
+            }
+            fire.toggle_fire();
         }
+    }
+
+    /// Abre o painel da primeira fogueira do mundo (para screenshots).
+    pub fn open_first_campfire(&mut self) {
+        if let Some(i) = self
+            .world
+            .structures
+            .iter()
+            .position(|s| s.kind == StructureKind::Campfire)
+        {
+            self.player.pos = self.world.structures[i].rect().center() - vec2(28.0, 0.0);
+            self.camera_pos = self.player.pos;
+            self.ui.container = Some(i);
+            self.ui.inventory_open = true;
+        }
+    }
+
+    /// Coloca uma criatura de cada espécie perto do jogador (para screenshots).
+    pub fn spawn_demo_creatures(&mut self) {
+        let offsets = [
+            vec2(-90.0, 40.0),
+            vec2(-40.0, 80.0),
+            vec2(70.0, 70.0),
+            vec2(120.0, 10.0),
+        ];
+        for (species, offset) in creatures::Species::ALL.into_iter().zip(offsets) {
+            let mut c = Creature::new(species, self.player.pos + offset);
+            c.facing_left = offset.x > 0.0;
+            self.creatures.push(c);
+        }
+        let mut corpse = Creature::new(creatures::Species::Dodo, self.player.pos + vec2(40.0, -50.0));
+        corpse.take_hit(999.0, self.player.pos);
+        self.creatures.push(corpse);
+        // Dilofossauro ferido, para mostrar a barra de vida.
+        let dilo = self.creatures.len() - 3;
+        self.creatures[dilo].take_hit(30.0, self.player.pos);
     }
 
     // ---------- Helpers ----------
@@ -238,7 +307,16 @@ impl Game {
     }
 
     fn popup(&mut self, pos: Vec2, text: String) {
-        self.popups.push(Popup { pos, text, age: 0.0 });
+        self.popup_styled(pos, text, PopupStyle::Gain);
+    }
+
+    fn popup_styled(&mut self, pos: Vec2, text: String, style: PopupStyle) {
+        self.popups.push(Popup {
+            pos,
+            text,
+            style,
+            age: 0.0,
+        });
     }
 
     fn equipped(&self) -> Option<ItemId> {
@@ -260,8 +338,8 @@ impl Game {
             .is_none_or(|kind| self.world.station_near(kind, self.player.pos))
     }
 
-    fn chest_mut(&mut self) -> Option<&mut Inventory> {
-        let i = self.ui.chest?;
+    fn container_mut(&mut self) -> Option<&mut Inventory> {
+        let i = self.ui.container?;
         self.world.structures.get_mut(i)?.storage.as_mut()
     }
 
@@ -272,7 +350,7 @@ impl Game {
         }
         // O que não couber de volta no inventário vai para o baú aberto ou para o chão.
         if let Some(left) = ui::return_held(&mut self.ui, &mut self.inventory) {
-            let left = match self.chest_mut() {
+            let left = match self.container_mut() {
                 Some(chest) => chest.insert_stack(left),
                 None => Some(left),
             };
@@ -280,7 +358,7 @@ impl Game {
                 self.drop_stack(stack);
             }
         }
-        self.ui.chest = None;
+        self.ui.container = None;
     }
 
     fn drop_stack(&mut self, stack: Stack) {
@@ -316,7 +394,8 @@ impl Game {
 
         self.deliver_crafts(dt);
         self.world.update(dt, self.player.pos);
-        self.validate_open_chest();
+        self.update_creatures(dt);
+        self.validate_open_container();
 
         for p in &mut self.popups {
             p.age += dt;
@@ -357,12 +436,8 @@ impl Game {
 
         self.update_hotbar_keys();
 
-        let chest = self
-            .ui
-            .chest
-            .and_then(|i| self.world.structures.get_mut(i))
-            .and_then(|s| s.storage.as_mut());
-        match ui::handle_input(&mut self.ui, &mut self.inventory, chest, &self.queue) {
+        let container = self.ui.container.and_then(|i| self.world.structures.get_mut(i));
+        match ui::handle_input(&mut self.ui, &mut self.inventory, container, &self.queue) {
             Some(UiAction::Craft(i)) => self.craft(i),
             Some(UiAction::CancelCraft(i)) => {
                 for stack in self.queue.cancel(i, &mut self.inventory) {
@@ -371,6 +446,7 @@ impl Game {
             }
             Some(UiAction::SelectHotbar(i)) => self.hotbar_selected = i,
             Some(UiAction::Drop(stack)) => self.drop_stack(stack),
+            Some(UiAction::ToggleFire) => self.toggle_fire(),
             None => {}
         }
 
@@ -455,11 +531,11 @@ impl Game {
         }
     }
 
-    /// Fecha o baú se ele sumiu ou se o jogador se afastou.
-    fn validate_open_chest(&mut self) {
-        let Some(i) = self.ui.chest else { return };
+    /// Fecha o baú/fogueira se ele sumiu ou se o jogador se afastou.
+    fn validate_open_container(&mut self) {
+        let Some(i) = self.ui.container else { return };
         let still_valid = self.world.structures.get(i).is_some_and(|s| {
-            s.kind == StructureKind::StorageBox
+            s.storage.is_some()
                 && building::distance_to_rect(self.player.pos, s.rect()) <= building::INTERACT_REACH + 16.0
         });
         if !still_valid || self.dead {
@@ -467,26 +543,82 @@ impl Game {
         }
     }
 
-    // ---------- Coleta, comida, água ----------
+    // ---------- Fauna ----------
 
-    /// Nó vivo mais próximo ao alcance, preferindo os que estão à frente do personagem.
-    fn find_target(&self) -> Option<usize> {
+    fn update_creatures(&mut self, dt: f32) {
+        let input = AiInput {
+            player_pos: self.player.pos,
+            player_alive: !self.dead,
+        };
+        let mut damage = 0.0;
+        for c in &mut self.creatures {
+            damage += c.update(&self.world, &input, &mut self.rng, dt);
+        }
+        self.creatures.retain(|c| !c.is_gone());
+
+        self.hurt_flash = (self.hurt_flash - dt).max(0.0);
+        if damage > 0.0 && !self.dead {
+            self.vitals.damage(damage);
+            self.hurt_flash = 0.35;
+            let at = self.player.pos - vec2(0.0, 36.0);
+            self.popup_styled(at, format!("-{damage:.0}"), PopupStyle::Hurt);
+            if self.vitals.is_dead() {
+                self.die();
+            }
+        }
+
+        self.spawn_timer -= dt;
+        if self.spawn_timer <= 0.0 {
+            self.spawn_timer = RESPAWN_SECS;
+            creatures::populate(&mut self.creatures, &self.world, self.player.pos, &mut self.rng, 40);
+        }
+    }
+
+    // ---------- Coleta, combate, comida, água ----------
+
+    /// Alvo mais próximo ao alcance, preferindo o que está à frente do personagem.
+    /// Criaturas vivas têm prioridade sobre recursos; carcaças contam como recurso.
+    fn find_target(&self) -> Option<Target> {
         let p = &self.player;
-        self.world
+        let weapon_reach = player::REACH + ItemId::reach_bonus(self.equipped());
+        let score = |pos: Vec2, radius: f32, reach: f32| {
+            let gap = pos.distance(p.pos) - radius;
+            let behind = (pos.x - p.pos.x) * p.facing.sign() < -4.0;
+            (gap <= reach).then_some(gap + if behind { 20.0 } else { 0.0 })
+        };
+        let nodes = self
+            .world
             .nodes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.is_alive())
-            .filter_map(|(i, n)| {
-                let gap = n.pos.distance(p.pos) - n.kind.collision_radius();
-                if gap > player::REACH {
-                    return None;
-                }
-                let behind = (n.pos.x - p.pos.x) * p.facing.sign() < -4.0;
-                Some((i, gap + if behind { 20.0 } else { 0.0 }))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
+            .filter_map(|(i, n)| score(n.pos, n.kind.collision_radius(), player::REACH).map(|s| (s, Target::Node(i))));
+        let creatures = self.creatures.iter().enumerate().filter_map(|(i, c)| {
+            let (reach, bonus) = if c.is_alive() {
+                (weapon_reach, 10.0)
+            } else {
+                (player::REACH, 0.0)
+            };
+            score(c.pos, c.species.radius(), reach).map(|s| (s - bonus, Target::Creature(i)))
+        });
+        nodes
+            .chain(creatures)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, t)| t)
+    }
+
+    /// Posição e raio do alvo atual, para o anel de destaque.
+    fn target_ring(&self, target: Target) -> (Vec2, f32) {
+        match target {
+            Target::Node(i) => {
+                let n = &self.world.nodes[i];
+                (n.pos, n.kind.collision_radius().max(8.0) + 6.0)
+            }
+            Target::Creature(i) => {
+                let c = &self.creatures[i];
+                (c.pos, c.species.radius() + 6.0)
+            }
+        }
     }
 
     /// Água ao alcance: no tile do jogador, à frente dele ou logo acima/abaixo.
@@ -510,8 +642,52 @@ impl Game {
             return;
         }
         self.player.swing_timer = player::SWING_TIME;
-        let Some(idx) = target else { return };
+        match target {
+            Some(Target::Node(i)) => self.hit_node(i),
+            Some(Target::Creature(i)) => self.hit_creature(i),
+            None => {}
+        }
+    }
 
+    /// Gasta durabilidade do item na mão (se ele tiver) e avisa se quebrou.
+    fn wear_equipped(&mut self) {
+        if let Some(broken) = self.inventory.wear(self.hotbar_selected) {
+            self.notify(format!("{} quebrou!", broken.name()));
+        }
+    }
+
+    fn hit_creature(&mut self, i: usize) {
+        let held = self.equipped();
+        let tool = self.equipped_tool();
+        let damage = ItemId::melee_damage(held);
+        let player_pos = self.player.pos;
+        let c = &mut self.creatures[i];
+        let pos = c.pos;
+        let species = c.species;
+        if c.is_alive() {
+            let died = c.take_hit(damage, player_pos);
+            self.player.face_towards(pos.x);
+            self.popup_styled(pos - vec2(0.0, 30.0), format!("-{damage:.0}"), PopupStyle::Damage);
+            if died {
+                self.notify(format!("{} abatido", species.name()));
+            }
+            if held.is_some_and(|item| item.max_durability().is_some()) {
+                self.wear_equipped();
+            }
+            return;
+        }
+        if !c.harvest() {
+            return;
+        }
+        self.player.face_towards(pos.x);
+        if matches!(tool, Some(ToolKind::Pickaxe | ToolKind::Hatchet)) {
+            self.wear_equipped();
+        }
+        let drops = gathering::roll_corpse_yield(species, tool, &mut self.rng);
+        self.give_drops(pos, drops);
+    }
+
+    fn hit_node(&mut self, idx: usize) {
         let tool = self.equipped_tool();
         let node = &mut self.world.nodes[idx];
         node.hp -= 1;
@@ -523,13 +699,15 @@ impl Game {
         self.player.face_towards(pos.x);
 
         // Só ferramentas de coleta desgastam ao coletar.
-        if matches!(tool, Some(ToolKind::Pickaxe | ToolKind::Hatchet))
-            && let Some(broken) = self.inventory.wear(self.hotbar_selected)
-        {
-            self.notify(format!("{} quebrou!", broken.name()));
+        if matches!(tool, Some(ToolKind::Pickaxe | ToolKind::Hatchet)) {
+            self.wear_equipped();
         }
-
         let drops = gathering::roll_yield(kind, tool, &mut self.rng);
+        self.give_drops(pos, drops);
+    }
+
+    /// Coloca os itens coletados no inventário, com números flutuantes sobre `pos`.
+    fn give_drops(&mut self, pos: Vec2, drops: Vec<(ItemId, u32)>) {
         let mut full = false;
         for (i, (item, n)) in drops.into_iter().enumerate() {
             let leftover = self.inventory.add(item, n);
@@ -566,6 +744,9 @@ impl Game {
         self.vitals.eat(effect);
         let at = self.player.pos - vec2(0.0, 40.0);
         self.popup(at, format!("+{} Comida", effect.food));
+        if effect.health < 0.0 {
+            self.notify("Carne crua faz mal. Cozinhe na fogueira!");
+        }
     }
 
     // ---------- Construção ----------
@@ -641,12 +822,11 @@ impl Game {
             Interaction::Bag(i) => self.pick_up(i),
             Interaction::Structure(i) => match self.world.structures[i].kind {
                 StructureKind::WoodDoor => self.toggle_door(i),
-                StructureKind::StorageBox => {
-                    self.ui.chest = Some(i);
+                StructureKind::StorageBox | StructureKind::Campfire => {
+                    self.ui.container = Some(i);
                     self.ui.inventory_open = true;
                 }
                 StructureKind::Workbench => self.set_inventory_open(true),
-                StructureKind::Campfire => self.feed_campfire(i),
                 StructureKind::WoodFoundation | StructureKind::WoodWall => {}
             },
         }
@@ -664,19 +844,14 @@ impl Game {
         door.open = !door.open;
     }
 
-    fn feed_campfire(&mut self, i: usize) {
-        if self.inventory.count(ItemId::Wood) == 0 {
-            self.notify("Precisa de Madeira");
+    /// Acende/apaga a fogueira aberta no painel.
+    fn toggle_fire(&mut self) {
+        let Some(fire) = self.ui.container.and_then(|i| self.world.structures.get_mut(i)) else {
             return;
+        };
+        if !fire.toggle_fire() {
+            self.notify("Coloque madeira ou palha na fogueira");
         }
-        let fire = &mut self.world.structures[i];
-        if !fire.add_fuel() {
-            self.notify("A fogueira já está cheia");
-            return;
-        }
-        let at = fire.rect().center() - vec2(0.0, 20.0);
-        self.inventory.remove(ItemId::Wood, 1);
-        self.popup(at, "+1 min de fogo".to_owned());
     }
 
     fn pick_up(&mut self, i: usize) {
@@ -762,9 +937,20 @@ impl Game {
         );
         render::draw_ground(&self.world, view, self.time);
         let interactive = !self.ui.inventory_open && !self.dead;
-        let target = if interactive { self.find_target() } else { None };
+        let ring = interactive
+            .then(|| self.find_target())
+            .flatten()
+            .map(|t| self.target_ring(t));
         let player = (!self.dead).then_some(&self.player);
-        render::draw_entities(&self.world, player, self.equipped(), target, view, self.time);
+        render::draw_entities(
+            &self.world,
+            &self.creatures,
+            player,
+            self.equipped(),
+            ring,
+            view,
+            self.time,
+        );
 
         let hour = daynight::hour(self.time);
         let flicker = 1.0 + (self.time * 9.0).sin() * 0.03 + (self.time * 23.0).sin() * 0.02;
@@ -785,6 +971,7 @@ impl Game {
         }
 
         set_default_camera();
+        render::draw_creature_bars(&self.creatures, &camera);
         render::draw_popups(&self.popups, &camera);
         if interactive && let Some(target) = self.nearest_interaction() {
             let (label, pos) = match target {
@@ -801,15 +988,12 @@ impl Game {
             render::draw_prompt(&label, pos, &camera);
         }
 
-        let chest = self
-            .ui
-            .chest
-            .and_then(|i| self.world.structures.get(i))
-            .and_then(|s| s.storage.as_ref());
+        let container = self.ui.container.and_then(|i| self.world.structures.get(i));
         ui::draw(&ui::Hud {
             ui: &self.ui,
             inventory: &self.inventory,
-            chest,
+            container,
+            hurt: self.hurt_flash,
             queue: &self.queue,
             station_ok: &|recipe| self.station_ok(recipe),
             selected: self.hotbar_selected,
@@ -904,23 +1088,61 @@ mod tests {
     }
 
     #[test]
-    fn campfire_burns_wood_and_doors_toggle() {
+    fn campfire_panel_and_doors() {
         let mut game = Game::new(1337);
         let here = building::tile_of(game.player.pos);
         game.world.place(StructureKind::Campfire, (here.0 + 1, here.1));
         game.world.place(StructureKind::WoodDoor, (here.0 - 1, here.1));
 
-        game.feed_campfire(0);
-        assert!(!game.world.structures[0].is_lit(), "sem madeira não acende");
-        game.inventory.add(ItemId::Wood, 2);
-        game.feed_campfire(0);
+        game.interact(Interaction::Structure(0));
+        assert_eq!(game.ui.container, Some(0));
+        game.toggle_fire();
+        assert!(!game.world.structures[0].is_lit(), "sem combustível não acende");
+        game.world.structures[0].storage.as_mut().unwrap().add(ItemId::Wood, 2);
+        game.toggle_fire();
         assert!(game.world.structures[0].is_lit());
-        assert_eq!(game.inventory.count(ItemId::Wood), 1);
         assert_eq!(game.world.lights().count(), 1);
 
         game.toggle_door(1);
         assert!(game.world.structures[1].open);
         game.toggle_door(1);
         assert!(!game.world.structures[1].open);
+    }
+
+    #[test]
+    fn kill_and_harvest_a_dodo() {
+        let mut game = Game::new(1337);
+        game.creatures.clear();
+        game.inventory.add(ItemId::WoodenSpear, 1);
+        let pos = game.player.pos + vec2(20.0, 0.0);
+        game.creatures.push(Creature::new(creatures::Species::Dodo, pos));
+
+        assert_eq!(game.find_target(), Some(Target::Creature(0)));
+        game.hit_creature(0);
+        game.hit_creature(0);
+        assert!(!game.creatures[0].is_alive());
+        assert_eq!(game.inventory.slots[0].unwrap().durability, 48, "a lança desgasta");
+
+        for _ in 0..creatures::Species::Dodo.harvest_hits() {
+            game.hit_creature(0);
+        }
+        assert!(game.inventory.count(ItemId::RawMeat) >= 3);
+        game.update_creatures(0.0);
+        assert!(game.creatures.is_empty(), "carcaça esgotada some");
+    }
+
+    #[test]
+    fn creature_bites_can_kill_the_player() {
+        let mut game = Game::new(1337);
+        game.creatures.clear();
+        game.inventory.add(ItemId::Stone, 3);
+        let pos = game.player.pos + vec2(22.0, 0.0);
+        game.creatures.push(Creature::new(creatures::Species::Raptor, pos));
+        game.vitals.health = 10.0;
+        for _ in 0..240 {
+            game.update_creatures(1.0 / 60.0);
+        }
+        assert!(game.dead);
+        assert!(game.world.bags.iter().any(|b| b.kind == BagKind::Death));
     }
 }

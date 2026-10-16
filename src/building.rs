@@ -4,14 +4,14 @@
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::inventory::Inventory;
+use crate::inventory::{Inventory, Stack};
 use crate::items::ItemId;
 use crate::world::TILE;
 
 pub const STORAGE_SLOTS: usize = 18;
-/// Segundos de fogo por madeira colocada na fogueira.
-pub const FUEL_PER_WOOD: f32 = 60.0;
-pub const MAX_FUEL: f32 = 600.0;
+pub const CAMPFIRE_SLOTS: usize = 6;
+/// Segundos para a fogueira cozinhar uma carne.
+pub const COOK_SECS: f32 = 10.0;
 pub const CAMPFIRE_LIGHT: f32 = 150.0;
 /// Distância máxima (jogador → centro do tile) para posicionar.
 pub const PLACE_REACH: f32 = TILE * 3.5;
@@ -89,12 +89,27 @@ pub struct Structure {
     /// Porta aberta.
     #[serde(default)]
     pub open: bool,
-    /// Segundos de fogo restantes (fogueira).
+    /// Segundos restantes do combustível que está queimando agora (fogueira).
     #[serde(default)]
     pub fuel: f32,
-    /// Conteúdo (caixa de armazenamento).
+    /// Fogueira ligada: queima o combustível do próprio inventário enquanto houver.
+    #[serde(default)]
+    pub active: bool,
+    /// Progresso (segundos) da carne que está cozinhando.
+    #[serde(default)]
+    pub cook: f32,
+    /// Conteúdo (caixa de armazenamento, fogueira).
     #[serde(default)]
     pub storage: Option<Inventory>,
+}
+
+/// Segundos de fogo que cada item rende como combustível.
+pub fn fuel_value(item: ItemId) -> Option<f32> {
+    match item {
+        ItemId::Wood => Some(60.0),
+        ItemId::Thatch => Some(15.0),
+        _ => None,
+    }
 }
 
 impl Structure {
@@ -104,7 +119,19 @@ impl Structure {
             tile,
             open: false,
             fuel: 0.0,
-            storage: (kind == StructureKind::StorageBox).then(|| Inventory::new(STORAGE_SLOTS)),
+            active: false,
+            cook: 0.0,
+            storage: storage_slots(kind).map(Inventory::new),
+        }
+    }
+
+    /// Ajusta estruturas vindas de saves antigos (v0.3: fogueira sem inventário).
+    pub fn normalize(&mut self) {
+        if self.storage.is_none() {
+            self.storage = storage_slots(self.kind).map(Inventory::new);
+        }
+        if self.kind == StructureKind::Campfire && self.fuel > 0.0 {
+            self.active = true;
         }
     }
 
@@ -113,7 +140,7 @@ impl Structure {
     }
 
     pub fn is_lit(&self) -> bool {
-        self.kind == StructureKind::Campfire && self.fuel > 0.0
+        self.kind == StructureKind::Campfire && self.active && self.fuel > 0.0
     }
 
     /// Y usada no y-sort: a base da estrutura.
@@ -132,13 +159,69 @@ impl Structure {
         }
     }
 
-    /// Adiciona combustível; retorna false se a fogueira já está cheia.
-    pub fn add_fuel(&mut self) -> bool {
-        if self.fuel + FUEL_PER_WOOD > MAX_FUEL {
+    /// Pega a próxima unidade de combustível do inventário, se houver.
+    fn refuel(&mut self) -> bool {
+        let Some(storage) = self.storage.as_mut() else {
+            return false;
+        };
+        for item in [ItemId::Thatch, ItemId::Wood] {
+            if storage.remove(item, 1) {
+                self.fuel += fuel_value(item).unwrap_or(0.0);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Acende/apaga a fogueira. Acender sem combustível falha.
+    pub fn toggle_fire(&mut self) -> bool {
+        if self.active {
+            self.active = false;
+            return true;
+        }
+        if self.fuel <= 0.0 && !self.refuel() {
             return false;
         }
-        self.fuel += FUEL_PER_WOOD;
+        self.active = true;
         true
+    }
+
+    /// Avança a fogueira: queima combustível e cozinha carne.
+    pub fn tick(&mut self, dt: f32) {
+        if self.kind != StructureKind::Campfire || !self.active {
+            return;
+        }
+        self.fuel -= dt;
+        if self.fuel <= 0.0 {
+            self.fuel = 0.0;
+            if !self.refuel() {
+                self.active = false;
+                return;
+            }
+        }
+        let Some(storage) = self.storage.as_mut() else { return };
+        if storage.count(ItemId::RawMeat) == 0 {
+            self.cook = 0.0;
+            return;
+        }
+        self.cook += dt;
+        if self.cook < COOK_SECS {
+            return;
+        }
+        self.cook = 0.0;
+        storage.remove(ItemId::RawMeat, 1);
+        if storage.insert_stack(Stack::new(ItemId::CookedMeat, 1)).is_some() {
+            // Sem espaço para a carne cozida: devolve a crua e espera.
+            storage.add(ItemId::RawMeat, 1);
+        }
+    }
+}
+
+fn storage_slots(kind: StructureKind) -> Option<usize> {
+    match kind {
+        StructureKind::StorageBox => Some(STORAGE_SLOTS),
+        StructureKind::Campfire => Some(CAMPFIRE_SLOTS),
+        _ => None,
     }
 }
 
@@ -177,21 +260,63 @@ mod tests {
         assert!(!floor.blocks(center, 7.0));
     }
 
-    #[test]
-    fn campfire_fuel_is_capped() {
+    fn fire_with(items: &[(ItemId, u32)]) -> Structure {
         let mut fire = Structure::new(StructureKind::Campfire, (0, 0));
-        assert!(!fire.is_lit());
-        let mut added = 0;
-        while fire.add_fuel() {
-            added += 1;
+        for &(item, n) in items {
+            fire.storage.as_mut().unwrap().add(item, n);
         }
-        assert_eq!(added, (MAX_FUEL / FUEL_PER_WOOD) as i32);
-        assert!(fire.is_lit());
+        fire
     }
 
     #[test]
-    fn only_storage_boxes_have_storage() {
+    fn campfire_needs_fuel_and_burns_it() {
+        let mut empty = fire_with(&[]);
+        assert!(!empty.toggle_fire());
+        assert!(!empty.is_lit());
+
+        let mut fire = fire_with(&[(ItemId::Wood, 2)]);
+        assert!(fire.toggle_fire());
+        assert!(fire.is_lit());
+        assert_eq!(fire.storage.as_ref().unwrap().count(ItemId::Wood), 1);
+        for _ in 0..121 {
+            fire.tick(1.0);
+        }
+        assert!(!fire.is_lit(), "apaga quando acaba a madeira");
+        assert_eq!(fire.storage.as_ref().unwrap().count(ItemId::Wood), 0);
+    }
+
+    #[test]
+    fn campfire_cooks_meat() {
+        let mut fire = fire_with(&[(ItemId::Wood, 5), (ItemId::RawMeat, 2)]);
+        fire.toggle_fire();
+        for _ in 0..(COOK_SECS as usize * 2 + 1) {
+            fire.tick(1.0);
+        }
+        let storage = fire.storage.as_ref().unwrap();
+        assert_eq!(storage.count(ItemId::CookedMeat), 2);
+        assert_eq!(storage.count(ItemId::RawMeat), 0);
+    }
+
+    #[test]
+    fn unlit_campfire_does_not_cook() {
+        let mut fire = fire_with(&[(ItemId::Wood, 5), (ItemId::RawMeat, 1)]);
+        fire.tick(COOK_SECS * 2.0);
+        assert_eq!(fire.storage.as_ref().unwrap().count(ItemId::CookedMeat), 0);
+    }
+
+    #[test]
+    fn old_campfire_gets_storage_on_normalize() {
+        let mut old = Structure::new(StructureKind::Campfire, (0, 0));
+        old.storage = None;
+        old.fuel = 30.0;
+        old.normalize();
+        assert!(old.storage.is_some() && old.is_lit());
+    }
+
+    #[test]
+    fn only_containers_have_storage() {
         assert!(Structure::new(StructureKind::StorageBox, (0, 0)).storage.is_some());
+        assert!(Structure::new(StructureKind::Campfire, (0, 0)).storage.is_some());
         assert!(Structure::new(StructureKind::WoodWall, (0, 0)).storage.is_none());
     }
 }

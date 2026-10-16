@@ -11,6 +11,9 @@ pub enum ItemId {
     Stone,
     Flint,
     Berry,
+    RawMeat,
+    CookedMeat,
+    Hide,
     StonePickaxe,
     StoneHatchet,
     WoodenSpear,
@@ -38,12 +41,15 @@ pub struct FoodEffect {
 
 impl ItemId {
     #[cfg(test)]
-    pub const ALL: [ItemId; 14] = [
+    pub const ALL: [ItemId; 17] = [
         ItemId::Wood,
         ItemId::Thatch,
         ItemId::Stone,
         ItemId::Flint,
         ItemId::Berry,
+        ItemId::RawMeat,
+        ItemId::CookedMeat,
+        ItemId::Hide,
         ItemId::StonePickaxe,
         ItemId::StoneHatchet,
         ItemId::WoodenSpear,
@@ -62,6 +68,9 @@ impl ItemId {
             ItemId::Stone => "Pedra",
             ItemId::Flint => "Sílex",
             ItemId::Berry => "Frutinha",
+            ItemId::RawMeat => "Carne Crua",
+            ItemId::CookedMeat => "Carne Cozida",
+            ItemId::Hide => "Couro",
             ItemId::StonePickaxe => "Picareta de Pedra",
             ItemId::StoneHatchet => "Machado de Pedra",
             ItemId::WoodenSpear => "Lança de Madeira",
@@ -76,7 +85,8 @@ impl ItemId {
 
     pub fn max_stack(self) -> u32 {
         match self {
-            ItemId::Wood | ItemId::Thatch | ItemId::Stone | ItemId::Flint | ItemId::Berry => 100,
+            ItemId::Wood | ItemId::Thatch | ItemId::Stone | ItemId::Flint | ItemId::Berry | ItemId::Hide => 100,
+            ItemId::RawMeat | ItemId::CookedMeat => 40,
             ItemId::Campfire | ItemId::Workbench | ItemId::StorageBox => 5,
             ItemId::WoodFoundation | ItemId::WoodWall | ItemId::WoodDoor => 20,
             ItemId::StonePickaxe | ItemId::StoneHatchet | ItemId::WoodenSpear => 1,
@@ -115,13 +125,31 @@ impl ItemId {
     }
 
     pub fn food_effect(self) -> Option<FoodEffect> {
+        let effect = |food, water, health| Some(FoodEffect { food, water, health });
         match self {
-            ItemId::Berry => Some(FoodEffect {
-                food: 8.0,
-                water: 2.0,
-                health: 0.0,
-            }),
+            ItemId::Berry => effect(8.0, 2.0, 0.0),
+            // Carne crua mata a fome mas faz mal; cozida também cura.
+            ItemId::RawMeat => effect(10.0, 0.0, -5.0),
+            ItemId::CookedMeat => effect(25.0, 0.0, 10.0),
             _ => None,
+        }
+    }
+
+    /// Dano corpo a corpo ao golpear uma criatura com este item na mão.
+    pub fn melee_damage(item: Option<ItemId>) -> f32 {
+        match item {
+            Some(ItemId::WoodenSpear) => 22.0,
+            Some(ItemId::StoneHatchet) => 12.0,
+            Some(ItemId::StonePickaxe) => 10.0,
+            _ => 6.0,
+        }
+    }
+
+    /// Alcance extra de ataque (a lança é comprida).
+    pub fn reach_bonus(item: Option<ItemId>) -> f32 {
+        match item {
+            Some(ItemId::WoodenSpear) => 14.0,
+            _ => 0.0,
         }
     }
 }
@@ -137,6 +165,15 @@ mod tests {
                 assert_eq!(item.max_stack(), 1, "{item:?}");
             }
         }
+    }
+
+    #[test]
+    fn spear_is_the_best_weapon() {
+        let spear = ItemId::melee_damage(Some(ItemId::WoodenSpear));
+        for item in ItemId::ALL {
+            assert!(ItemId::melee_damage(Some(item)) <= spear);
+        }
+        assert!(ItemId::melee_damage(None) < spear);
     }
 
     #[test]

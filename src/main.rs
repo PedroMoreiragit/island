@@ -3,6 +3,7 @@
 
 mod building;
 mod crafting;
+mod creatures;
 mod daynight;
 mod game;
 mod gathering;
@@ -57,7 +58,9 @@ async fn main() {
 
     // Smoke test: ISLAND_SHOT=caminho.png salva um screenshot e encerra (sem ler/gravar save).
     // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug; ISLAND_SHOT_DEAD=1 mostra a morte;
-    // ISLAND_SHOT_BUILD=1 monta uma cabana de exemplo; ISLAND_SHOT_HOUR=22 ajusta o relógio.
+    // ISLAND_SHOT_BUILD=1 monta uma cabana de exemplo; ISLAND_SHOT_HOUR=22 ajusta o relógio;
+    // ISLAND_SHOT_CREATURES=1 coloca uma criatura de cada espécie perto do jogador;
+    // ISLAND_SHOT_FIRE=1 monta a cabana e abre o painel da fogueira.
     let shot = env("ISLAND_SHOT");
     let mut game = if shot.is_some() {
         let mut game = Game::new(seed);
@@ -65,8 +68,15 @@ async fn main() {
             game.give_debug_items();
             game.open_inventory();
         }
+        if env("ISLAND_SHOT_CREATURES").is_some() {
+            game.spawn_demo_creatures();
+        }
         if env("ISLAND_SHOT_BUILD").is_some() {
             game.build_demo_base();
+        }
+        if env("ISLAND_SHOT_FIRE").is_some() {
+            game.build_demo_base();
+            game.open_first_campfire();
         }
         if let Some(hour) = env("ISLAND_SHOT_HOUR").and_then(|h| h.parse().ok()) {
             game.skip_to_hour(hour);

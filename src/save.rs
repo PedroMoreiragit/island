@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::building::Structure;
 use crate::crafting::CraftQueue;
+use crate::creatures::CreatureSave;
 use crate::inventory::Stack;
 use crate::vitals::Vitals;
 use crate::world::BagKind;
@@ -32,6 +33,9 @@ pub struct SaveData {
     pub structures: Vec<Structure>,
     #[serde(default)]
     pub craft_queue: CraftQueue,
+    /// `None` em saves anteriores à v0.4 (a fauna é gerada do zero).
+    #[serde(default)]
+    pub creatures: Option<Vec<CreatureSave>>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -95,6 +99,12 @@ mod tests {
             }],
             structures: vec![Structure::new(crate::building::StructureKind::StorageBox, (1, 2))],
             craft_queue: CraftQueue::default(),
+            creatures: Some(vec![CreatureSave {
+                species: crate::creatures::Species::Raptor,
+                pos: [5.0, 6.0],
+                health: 40.0,
+                corpse: None,
+            }]),
         };
         let path = std::env::temp_dir().join(format!("island-test-{}/save.json", std::process::id()));
         write(&path, &data).unwrap();
@@ -114,5 +124,6 @@ mod tests {
             "inventory":[],"hotbar_selected":0,"nodes":[],"bags":[]}"#;
         let data: SaveData = serde_json::from_str(json).unwrap();
         assert!(data.structures.is_empty() && data.craft_queue.jobs.is_empty());
+        assert!(data.creatures.is_none());
     }
 }

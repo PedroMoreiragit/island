@@ -20,17 +20,20 @@ Cada marco é jogável por si só. A ordem prioriza o loop central de survival a
 
 ## ✅ v0.3 — Construção
 - Estruturas em grid com prévia verde/vermelha: fundação, parede e porta de madeira (paredes em 3/4)
-- Fogueira que queima madeira e ilumina a noite (cozinhar fica para a v0.4, junto com a carne)
+- Fogueira que queima madeira e ilumina a noite
 - Caixa de armazenamento (18 slots, Shift+clique transfere)
 - Bancada: receitas de construção exigem estar perto dela
 - Fila de crafting com tempo por receita (cancelável, devolve materiais)
 - Ciclo dia/noite (12 min reais) com iluminação suave e entardecer alaranjado
 - Demolir estruturas (X) devolve o item
 
-## v0.4 — Fauna e combate
-- Criaturas passivas (dodô, trilobita) e agressivas (dilofossauro, raptor) com IA simples (vagar, fugir, perseguir)
-- Combate corpo a corpo e lança; carne crua/cozida, couro
-- Spawn por bioma e limites de população
+## ✅ v0.4 — Fauna e combate
+- Criaturas passivas (dodô, trilobita) e agressivas (dilofossauro, raptor) com IA simples (vagar, fugir, perseguir, atacar)
+- Combate corpo a corpo com dano por arma (lança: mais dano e alcance) e durabilidade
+- Carcaças coletáveis: machado rende carne, picareta rende couro
+- Fogueira com inventário: queima madeira/palha e cozinha carne (carne crua faz mal)
+- Spawn por bioma (praia, campo, floresta), limite de população e zonas seguras (spawn e bases)
+- Ainda não: estragar comida, armaduras e itens que usam couro (selas chegam na v0.5)
 
 ## v0.5 — Domesticação ⭐
 - Nocaute (torpor) com estilingue/clava + narcóticos

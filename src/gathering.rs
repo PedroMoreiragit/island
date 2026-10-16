@@ -1,6 +1,7 @@
 //! O que cada golpe rende, por tipo de nó e ferramenta.
 //! Como no ARK: machado favorece madeira/pedra, picareta favorece palha/sílex.
 
+use crate::creatures::Species;
 use crate::items::{ItemId, ToolKind};
 use crate::rng::Rng;
 use crate::world::NodeKind;
@@ -47,6 +48,21 @@ pub fn roll_yield(kind: NodeKind, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<
     drops
 }
 
+/// O que cada golpe numa carcaça rende. Machado favorece carne; picareta, couro.
+pub fn roll_corpse_yield(species: Species, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<(ItemId, u32)> {
+    let big = u32::from(species.is_big());
+    let tool = tool.filter(|t| *t != ToolKind::Spear);
+    let (meat, hide) = match tool {
+        Some(ToolKind::Hatchet) => (rng.range_u32(2, 3) + big, u32::from(rng.chance(0.5))),
+        Some(_) => (u32::from(rng.chance(0.5)), rng.range_u32(2, 3) + big),
+        None => (1, u32::from(rng.chance(0.3))),
+    };
+    [(ItemId::RawMeat, meat), (ItemId::Hide, hide)]
+        .into_iter()
+        .filter(|&(_, n)| n > 0)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +80,18 @@ mod tests {
             assert!(total(&hatchet, ItemId::Wood) > total(&hand, ItemId::Wood));
             let pick = roll_yield(NodeKind::Rock, Some(ToolKind::Pickaxe), &mut rng);
             assert!(total(&pick, ItemId::Flint) >= 2);
+        }
+    }
+
+    #[test]
+    fn hatchet_gives_meat_and_pickaxe_gives_hide() {
+        let mut rng = Rng::new(2);
+        for _ in 0..50 {
+            let hatchet = roll_corpse_yield(Species::Raptor, Some(ToolKind::Hatchet), &mut rng);
+            let pick = roll_corpse_yield(Species::Raptor, Some(ToolKind::Pickaxe), &mut rng);
+            let hand = roll_corpse_yield(Species::Raptor, None, &mut rng);
+            assert!(total(&hatchet, ItemId::RawMeat) > total(&hand, ItemId::RawMeat));
+            assert!(total(&pick, ItemId::Hide) > total(&hand, ItemId::Hide));
         }
     }
 }

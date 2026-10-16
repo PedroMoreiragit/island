@@ -3,6 +3,7 @@
 
 use macroquad::prelude::*;
 
+use crate::building::{COOK_SECS, Structure, StructureKind};
 use crate::crafting::{self, CraftQueue, MAX_QUEUE, RECIPES, Recipe};
 use crate::daynight;
 use crate::inventory::{HOTBAR_SIZE, Inventory, Stack};
@@ -32,8 +33,8 @@ pub struct UiState {
     pub inventory_open: bool,
     /// Pilha "presa" ao cursor enquanto o jogador reorganiza o inventário.
     pub held: Option<Stack>,
-    /// Índice (em `world.structures`) do baú aberto junto com o inventário.
-    pub chest: Option<usize>,
+    /// Índice (em `world.structures`) do contêiner (baú, fogueira) aberto junto com o inventário.
+    pub container: Option<usize>,
     pub hide_help: bool,
 }
 
@@ -43,13 +44,17 @@ pub enum UiAction {
     SelectHotbar(usize),
     /// Pilha solta fora dos painéis: vai para o chão.
     Drop(Stack),
+    /// Acender/apagar a fogueira aberta.
+    ToggleFire,
 }
 
 /// Tudo o que o HUD precisa ler do jogo.
 pub struct Hud<'a> {
     pub ui: &'a UiState,
     pub inventory: &'a Inventory,
-    pub chest: Option<&'a Inventory>,
+    pub container: Option<&'a Structure>,
+    /// Flash vermelho de dano recebido (s restantes).
+    pub hurt: f32,
     pub queue: &'a CraftQueue,
     /// Receitas que pedem estação estão liberadas (estação por perto)?
     pub station_ok: &'a dyn Fn(&Recipe) -> bool,
@@ -68,8 +73,10 @@ enum RightLayout {
         detail: Rect,
         queue: Vec<Rect>,
     },
-    Chest {
+    Container {
         slots: Vec<Rect>,
+        /// Botão de acender/apagar (só fogueira).
+        fire_button: Option<Rect>,
     },
 }
 
@@ -93,13 +100,16 @@ fn grid_height(n: usize, cols: usize, size: f32) -> f32 {
     n.div_ceil(cols) as f32 * (size + GAP) - GAP
 }
 
-/// `chest_slots`: tamanho do baú aberto, se houver (substitui o painel de crafting).
-fn panel_layout(n_slots: usize, chest_slots: Option<usize>, queue_len: usize) -> PanelLayout {
+/// Altura extra do painel da fogueira (status + botão).
+const FIRE_EXTRA: f32 = 84.0;
+
+/// `container`: (slots, é fogueira) do contêiner aberto, se houver (substitui o painel de crafting).
+fn panel_layout(n_slots: usize, container: Option<(usize, bool)>, queue_len: usize) -> PanelLayout {
     let grid_w = COLS as f32 * (SLOT + GAP) - GAP;
     let inv_w = grid_w + PAD * 2.0;
     let inv_h = HEADER + PAD * 2.0 + grid_height(n_slots, COLS, SLOT) + 8.0;
-    let right_h = match chest_slots {
-        Some(n) => HEADER + PAD * 2.0 + grid_height(n, COLS, SLOT) + 24.0,
+    let right_h = match container {
+        Some((n, fire)) => HEADER + PAD * 2.0 + grid_height(n, COLS, SLOT) + 24.0 + if fire { FIRE_EXTRA } else { 0.0 },
         None => {
             HEADER + PAD * 2.0 + grid_height(RECIPES.len(), COLS, SLOT) + DETAIL_H + 24.0 + 22.0 + SMALL_SLOT + 48.0
         }
@@ -116,10 +126,15 @@ fn panel_layout(n_slots: usize, chest_slots: Option<usize>, queue_len: usize) ->
 
     let rx = x0 + inv_w + 16.0;
     let top = vec2(rx + PAD, y0 + HEADER + PAD);
-    let right = match chest_slots {
-        Some(n) => RightLayout::Chest {
-            slots: grid(top, n, COLS, SLOT),
-        },
+    let right = match container {
+        Some((n, fire)) => {
+            let slots = grid(top, n, COLS, SLOT);
+            let below = top.y + grid_height(n, COLS, SLOT) + 44.0;
+            RightLayout::Container {
+                slots,
+                fire_button: fire.then(|| Rect::new(top.x, below, 120.0, 32.0)),
+            }
+        }
         None => {
             let recipes = grid(top, RECIPES.len(), COLS, SLOT);
             let detail_y = top.y + grid_height(RECIPES.len(), COLS, SLOT) + 12.0;
@@ -167,9 +182,11 @@ pub fn return_held(ui: &mut UiState, inv: &mut Inventory) -> Option<Stack> {
 pub fn handle_input(
     ui: &mut UiState,
     inv: &mut Inventory,
-    mut chest: Option<&mut Inventory>,
+    container: Option<&mut Structure>,
     queue: &CraftQueue,
 ) -> Option<UiAction> {
+    let is_fire = container.as_ref().is_some_and(|s| s.kind == StructureKind::Campfire);
+    let mut chest = container.and_then(|s| s.storage.as_mut());
     let m = mouse();
     if !ui.inventory_open {
         if is_mouse_button_pressed(MouseButton::Left) {
@@ -181,7 +198,11 @@ pub fn handle_input(
         return None;
     }
 
-    let layout = panel_layout(inv.slots.len(), chest.as_ref().map(|c| c.slots.len()), queue.jobs.len());
+    let layout = panel_layout(
+        inv.slots.len(),
+        chest.as_ref().map(|c| (c.slots.len(), is_fire)),
+        queue.jobs.len(),
+    );
     let left = is_mouse_button_pressed(MouseButton::Left);
     let right = is_mouse_button_pressed(MouseButton::Right);
     let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
@@ -195,7 +216,10 @@ pub fn handle_input(
     }
 
     match &layout.right {
-        RightLayout::Chest { slots } => {
+        RightLayout::Container { slots, fire_button } => {
+            if left && fire_button.is_some_and(|b| b.contains(m)) {
+                return Some(UiAction::ToggleFire);
+            }
             if let (Some(chest), Some(i)) = (chest, slots.iter().position(|r| r.contains(m))) {
                 if left && shift && ui.held.is_none() {
                     transfer(&mut chest.slots[i], inv);
@@ -297,6 +321,10 @@ pub fn draw(hud: &Hud) {
         shadowed("H: ajuda", 12.0, 22.0, 20.0, DIM);
     } else {
         draw_help();
+    }
+    if hud.hurt > 0.0 {
+        let a = (hud.hurt / 0.35).min(1.0) * 0.25;
+        draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.8, 0.0, 0.0, a));
     }
     draw_clock(hud.time);
     draw_vitals(hud.vitals);
@@ -442,7 +470,13 @@ fn draw_panel(rect: Rect, title: &str) {
 
 fn draw_panels(hud: &Hud) {
     let (ui, inv) = (hud.ui, hud.inventory);
-    let layout = panel_layout(inv.slots.len(), hud.chest.map(|c| c.slots.len()), hud.queue.jobs.len());
+    let storage = hud.container.and_then(|s| s.storage.as_ref());
+    let is_fire = hud.container.is_some_and(|s| s.kind == StructureKind::Campfire);
+    let layout = panel_layout(
+        inv.slots.len(),
+        storage.map(|c| (c.slots.len(), is_fire)),
+        hud.queue.jobs.len(),
+    );
     let m = mouse();
 
     draw_rectangle(
@@ -467,14 +501,17 @@ fn draw_panels(hud: &Hud) {
         .map(|s| stack_tooltip(&s));
 
     let rp = layout.right_panel;
-    match (&layout.right, hud.chest) {
-        (RightLayout::Chest { slots }, Some(chest)) => {
-            draw_panel(rp, "Caixa de Armazenamento");
+    match (&layout.right, hud.container.zip(storage)) {
+        (RightLayout::Container { slots, fire_button }, Some((structure, chest))) => {
+            draw_panel(rp, structure.kind.item().name());
             for (i, rect) in slots.iter().enumerate() {
                 draw_slot(*rect, chest.slots[i], false);
             }
             if let Some(s) = slots.iter().position(|r| r.contains(m)).and_then(|i| chest.slots[i]) {
                 tooltip = Some(stack_tooltip(&s));
+            }
+            if let Some(button) = fire_button {
+                draw_fire_controls(structure, slots, *button, m);
             }
             draw_text(
                 "Shift+clique: transferir tudo",
@@ -528,6 +565,43 @@ fn draw_panels(hud: &Hud) {
         draw_count(r, held.count);
     } else if let Some(text) = tooltip {
         draw_tooltip(&text, m);
+    }
+}
+
+/// Status da fogueira (combustível, cozimento) e botão acender/apagar.
+fn draw_fire_controls(fire: &Structure, slots: &[Rect], button: Rect, m: Vec2) {
+    let y = slots.last().map_or(button.y - 40.0, |r| r.bottom()) + 24.0;
+    let x = button.x;
+    let status = if fire.is_lit() {
+        let secs = fire.fuel.ceil() as u32;
+        format!("Acesa: {}:{:02} nesta lenha", secs / 60, secs % 60)
+    } else {
+        "Apagada. Coloque madeira ou palha.".to_owned()
+    };
+    draw_text(&status, x, y, 18.0, if fire.is_lit() { ACCENT } else { DIM });
+
+    let hover = button.contains(m);
+    let bg = if hover {
+        ACCENT
+    } else {
+        Color::new(0.85, 0.65, 0.25, 1.0)
+    };
+    draw_rectangle(button.x, button.y, button.w, button.h, bg);
+    let label = if fire.active { "Apagar" } else { "Acender" };
+    let w = measure_text(label, None, 20, 1.0).width;
+    draw_text(
+        label,
+        button.x + (button.w - w) / 2.0,
+        button.y + 22.0,
+        20.0,
+        Color::new(0.1, 0.08, 0.05, 1.0),
+    );
+
+    if fire.is_lit() && fire.cook > 0.0 {
+        let bar = Rect::new(button.right() + 16.0, button.y + 20.0, 200.0, 6.0);
+        draw_text("Cozinhando carne", bar.x, button.y + 12.0, 16.0, TEXT);
+        draw_rectangle(bar.x, bar.y, bar.w, bar.h, Color::new(1.0, 1.0, 1.0, 0.15));
+        draw_rectangle(bar.x, bar.y, bar.w * (fire.cook / COOK_SECS).min(1.0), bar.h, OK);
     }
 }
 
@@ -678,6 +752,28 @@ pub fn draw_item_icon(item: ItemId, rect: Rect) {
                 draw_circle(b.x - 2.0 * u, b.y - 2.0 * u, 2.0 * u, hi);
             }
             line(p(0.0, -12.0), p(4.0, -18.0), 2.0, Color::from_rgba(70, 120, 50, 255));
+        }
+        ItemId::RawMeat | ItemId::CookedMeat => {
+            let (meat, fat) = if item == ItemId::RawMeat {
+                (Color::from_rgba(200, 70, 80, 255), Color::from_rgba(240, 190, 190, 255))
+            } else {
+                (Color::from_rgba(150, 82, 40, 255), Color::from_rgba(210, 150, 90, 255))
+            };
+            let a = p(-3.0, 2.0);
+            draw_ellipse(a.x, a.y, 13.0 * u, 10.0 * u, 0.0, meat);
+            draw_ellipse(a.x - 3.0 * u, a.y - 3.0 * u, 6.0 * u, 3.0 * u, 0.0, fat);
+            line(p(8.0, -4.0), p(16.0, -12.0), 4.0, Color::from_rgba(235, 228, 210, 255));
+            let b = p(17.0, -13.0);
+            draw_circle(b.x, b.y, 3.0 * u, Color::from_rgba(235, 228, 210, 255));
+        }
+        ItemId::Hide => {
+            let col = Color::from_rgba(160, 120, 80, 255);
+            draw_ellipse(c.x, c.y, 15.0 * u, 11.0 * u, 0.3, col);
+            for (dx, dy) in [(-13.0, -9.0), (13.0, -9.0), (-12.0, 10.0), (12.0, 10.0)] {
+                let q = p(dx, dy);
+                draw_circle(q.x, q.y, 4.0 * u, col);
+            }
+            draw_ellipse(c.x, c.y, 7.0 * u, 5.0 * u, 0.3, Color::from_rgba(130, 94, 60, 255));
         }
         ItemId::StonePickaxe => {
             line(p(-12.0, 14.0), p(8.0, -10.0), 4.0, wood);

@@ -4,6 +4,7 @@
 use macroquad::prelude::*;
 
 use crate::building::{self, Structure, StructureKind};
+use crate::creatures::{Creature, Species, State};
 use crate::items::ItemId;
 use crate::player::{Player, SWING_TIME};
 use crate::rng::hash2;
@@ -109,30 +110,24 @@ enum Drawable<'a> {
     Node(&'a ResourceNode),
     Bag(&'a GroundBag),
     Structure(&'a Structure),
+    Creature(&'a Creature),
     Player(&'a Player),
 }
 
 /// Desenha nós e jogador ordenados por Y (quem está mais "embaixo" fica na frente).
 pub fn draw_entities(
     world: &World,
+    creatures: &[Creature],
     // `None` enquanto o jogador está morto.
     player: Option<&Player>,
     held: Option<ItemId>,
-    target: Option<usize>,
+    // Anel de destaque do alvo atual: (posição, raio).
+    ring: Option<(Vec2, f32)>,
     view: Rect,
     time: f32,
 ) {
-    if let Some(node) = target.map(|i| &world.nodes[i]) {
-        let r = node.kind.collision_radius().max(8.0) + 6.0;
-        draw_ellipse_lines(
-            node.pos.x,
-            node.pos.y,
-            r,
-            r * 0.45,
-            0.0,
-            1.5,
-            Color::new(1.0, 1.0, 1.0, 0.7),
-        );
+    if let Some((pos, r)) = ring {
+        draw_ellipse_lines(pos.x, pos.y, r, r * 0.45, 0.0, 1.5, Color::new(1.0, 1.0, 1.0, 0.7));
     }
 
     let player_pos = player.map_or(vec2(f32::MIN, f32::MIN), |p| p.pos);
@@ -163,6 +158,12 @@ pub fn draw_entities(
             .filter(|s| s.kind != StructureKind::WoodFoundation && s.rect().overlaps(&culled))
             .map(|s| (s.sort_y(), Drawable::Structure(s))),
     );
+    list.extend(
+        creatures
+            .iter()
+            .filter(|c| culled.contains(c.pos))
+            .map(|c| (c.pos.y, Drawable::Creature(c))),
+    );
     if let Some(p) = player {
         list.push((p.pos.y, Drawable::Player(p)));
     }
@@ -173,6 +174,7 @@ pub fn draw_entities(
             Drawable::Node(n) => draw_node(n, player_pos),
             Drawable::Bag(b) => draw_bag(b, time),
             Drawable::Structure(s) => draw_structure(s, time),
+            Drawable::Creature(c) => draw_creature(c),
             Drawable::Player(p) => draw_player(p, held),
         }
     }
@@ -293,11 +295,8 @@ pub fn structure_label(s: &Structure) -> String {
         StructureKind::WoodDoor => "[F] Abrir porta".to_owned(),
         StructureKind::StorageBox => "[F] Abrir caixa".to_owned(),
         StructureKind::Workbench => "[F] Usar bancada".to_owned(),
-        StructureKind::Campfire if s.is_lit() => {
-            let secs = s.fuel.ceil() as u32;
-            format!("[F] Pôr madeira (fogo: {}:{:02})", secs / 60, secs % 60)
-        }
-        StructureKind::Campfire => "[F] Acender (1 Madeira)".to_owned(),
+        StructureKind::Campfire if s.is_lit() => "[F] Abrir fogueira (acesa)".to_owned(),
+        StructureKind::Campfire => "[F] Abrir fogueira".to_owned(),
         _ => String::new(),
     }
 }
@@ -618,10 +617,21 @@ fn draw_held_item(item: ItemId, hand: Vec2, dir: Vec2) {
     }
 }
 
-/// Números flutuantes de coleta (“+3 Madeira”). Desenhados em espaço de tela para texto nítido.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupStyle {
+    /// Itens ganhos ("+3 Madeira").
+    Gain,
+    /// Dano causado numa criatura.
+    Damage,
+    /// Dano recebido pelo jogador.
+    Hurt,
+}
+
+/// Números flutuantes (“+3 Madeira”, “-22”). Desenhados em espaço de tela para texto nítido.
 pub struct Popup {
     pub pos: Vec2,
     pub text: String,
+    pub style: PopupStyle,
     pub age: f32,
 }
 
@@ -641,12 +651,185 @@ pub fn draw_popups(popups: &[Popup], camera: &Camera2D) {
             size,
             Color::new(0.0, 0.0, 0.0, alpha * 0.6),
         );
-        draw_text(
-            &p.text,
-            screen.x - w / 2.0,
-            screen.y,
-            size,
-            Color::new(1.0, 0.95, 0.7, alpha),
+        let color = match p.style {
+            PopupStyle::Gain => Color::new(1.0, 0.95, 0.7, alpha),
+            PopupStyle::Damage => Color::new(1.0, 1.0, 1.0, alpha),
+            PopupStyle::Hurt => Color::new(1.0, 0.35, 0.3, alpha),
+        };
+        draw_text(&p.text, screen.x - w / 2.0, screen.y, size, color);
+    }
+}
+
+/// Mistura `c` com vermelho/branco enquanto a criatura pisca por dano.
+fn hurt_tint(c: Color, hurt: f32) -> Color {
+    let t = (hurt / 0.2).clamp(0.0, 1.0) * 0.7;
+    Color::new(c.r + (1.0 - c.r) * t, c.g * (1.0 - t), c.b * (1.0 - t), c.a)
+}
+
+fn draw_creature(c: &Creature) {
+    let s = if c.facing_left { -1.0 } else { 1.0 };
+    let lunge = (c.lunge / 0.25) * 6.0 * s;
+    let pos = c.pos + vec2(lunge, 0.0);
+    let step = if c.moving { (c.anim_time * 9.0).sin() } else { 0.0 };
+    let r = c.species.radius();
+    draw_ellipse(pos.x, pos.y, r + 3.0, 4.0, 0.0, SHADOW);
+    if !c.is_alive() {
+        draw_corpse(c.species, pos, s);
+        return;
+    }
+    let tint = |col| hurt_tint(col, c.hurt);
+    match c.species {
+        Species::Dodo => draw_dodo(pos, s, step, &tint),
+        Species::Trilobite => draw_trilobite(pos, step, &tint),
+        Species::Dilophosaur => draw_theropod(
+            pos,
+            s,
+            step,
+            1.0,
+            true,
+            tint(Color::from_rgba(92, 140, 70, 255)),
+            tint(Color::from_rgba(230, 196, 70, 255)),
+        ),
+        Species::Raptor => draw_theropod(
+            pos,
+            s,
+            step,
+            1.1,
+            false,
+            tint(Color::from_rgba(176, 110, 60, 255)),
+            tint(Color::from_rgba(110, 64, 34, 255)),
+        ),
+    }
+}
+
+fn draw_dodo(pos: Vec2, s: f32, step: f32, tint: &dyn Fn(Color) -> Color) {
+    let (x, y) = (pos.x, pos.y);
+    let body = tint(Color::from_rgba(150, 128, 110, 255));
+    let legs = tint(Color::from_rgba(214, 170, 60, 255));
+    draw_line(x - 2.0, y - 5.0, x - 2.0 + step * 2.0, y, 2.0, legs);
+    draw_line(x + 2.0, y - 5.0, x + 2.0 - step * 2.0, y, 2.0, legs);
+    draw_ellipse(x, y - 10.0, 10.0, 8.0, 0.0, body);
+    draw_ellipse(
+        x - 7.0 * s,
+        y - 12.0,
+        4.0,
+        3.0,
+        0.0,
+        tint(Color::from_rgba(230, 226, 220, 255)),
+    );
+    draw_circle(x + 7.0 * s, y - 18.0, 5.0, body);
+    draw_triangle(
+        vec2(x + 10.0 * s, y - 20.0),
+        vec2(x + 10.0 * s, y - 15.0),
+        vec2(x + 17.0 * s, y - 16.0),
+        legs,
+    );
+    draw_circle(x + 8.0 * s, y - 19.0, 1.2, BLACK);
+}
+
+fn draw_trilobite(pos: Vec2, step: f32, tint: &dyn Fn(Color) -> Color) {
+    let (x, y) = (pos.x, pos.y);
+    let shell = tint(Color::from_rgba(96, 116, 140, 255));
+    let ridge = tint(Color::from_rgba(70, 86, 108, 255));
+    for i in -2..=2 {
+        let lx = x + i as f32 * 3.5;
+        draw_line(lx, y - 3.0, lx + step, y + 1.0, 1.2, ridge);
+    }
+    draw_ellipse(x, y - 4.0, 10.0, 6.0, 0.0, shell);
+    for i in -1..=1 {
+        let lx = x + i as f32 * 4.0;
+        draw_line(lx, y - 9.0, lx, y + 1.0, 1.0, ridge);
+    }
+    draw_ellipse(x, y - 6.0, 4.0, 3.0, 0.0, tint(Color::from_rgba(130, 150, 172, 255)));
+}
+
+/// Dinossauro bípede genérico (dilofossauro, raptor): corpo, cauda, pescoço e cabeça.
+#[allow(clippy::too_many_arguments)]
+fn draw_theropod(pos: Vec2, s: f32, step: f32, scale: f32, crest: bool, body: Color, accent: Color) {
+    let (x, y) = (pos.x, pos.y);
+    let k = scale;
+    let dark = Color::new(body.r * 0.7, body.g * 0.7, body.b * 0.7, 1.0);
+    // Pernas
+    draw_line(x - 3.0 * k, y - 10.0 * k, x - 3.0 * k + step * 3.0, y, 3.0, dark);
+    draw_line(x + 3.0 * k, y - 10.0 * k, x + 3.0 * k - step * 3.0, y, 3.0, dark);
+    // Cauda
+    draw_triangle(
+        vec2(x - 4.0 * k * s, y - 16.0 * k),
+        vec2(x - 4.0 * k * s, y - 10.0 * k),
+        vec2(x - 22.0 * k * s, y - 15.0 * k),
+        body,
+    );
+    // Corpo
+    draw_ellipse(x, y - 13.0 * k, 10.0 * k, 6.5 * k, 0.0, body);
+    // Pescoço e cabeça
+    draw_line(
+        x + 6.0 * k * s,
+        y - 15.0 * k,
+        x + 10.0 * k * s,
+        y - 24.0 * k,
+        4.0 * k,
+        body,
+    );
+    draw_ellipse(x + 13.0 * k * s, y - 25.0 * k, 6.0 * k, 3.5 * k, 0.0, body);
+    draw_circle(x + 14.0 * k * s, y - 26.0 * k, 1.2, BLACK);
+    // Detalhe: crista (dilo) ou listras (raptor)
+    if crest {
+        draw_triangle(
+            vec2(x + 9.0 * s, y - 27.0),
+            vec2(x + 15.0 * s, y - 27.0),
+            vec2(x + 11.0 * s, y - 33.0),
+            accent,
         );
+    } else {
+        for i in 0..3 {
+            let sx = x + (i as f32 * 4.0 - 4.0) * k;
+            draw_line(sx, y - 18.0 * k, sx - 1.0 * s, y - 13.0 * k, 1.5, accent);
+        }
+    }
+    // Braços
+    draw_line(x + 7.0 * k * s, y - 13.0 * k, x + 10.0 * k * s, y - 10.0 * k, 1.5, dark);
+}
+
+fn draw_corpse(species: Species, pos: Vec2, s: f32) {
+    let (x, y) = (pos.x, pos.y);
+    let col = match species {
+        Species::Dodo => Color::from_rgba(120, 104, 92, 255),
+        Species::Trilobite => Color::from_rgba(80, 96, 116, 255),
+        Species::Dilophosaur => Color::from_rgba(74, 110, 58, 255),
+        Species::Raptor => Color::from_rgba(140, 90, 52, 255),
+    };
+    let r = species.radius();
+    draw_ellipse(x, y - 4.0, r + 2.0, r * 0.45, 0.0, col);
+    // Patas para cima
+    for i in [-1.0, 1.0] {
+        let lx = x + i * r * 0.4;
+        draw_line(lx, y - 6.0, lx + 1.5 * i, y - 6.0 - r * 0.6, 1.5, col);
+    }
+    let ex = x + r * 0.7 * s;
+    draw_line(ex - 1.5, y - 7.0, ex + 1.5, y - 4.0, 1.0, BLACK);
+    draw_line(ex - 1.5, y - 4.0, ex + 1.5, y - 7.0, 1.0, BLACK);
+}
+
+/// Barras de vida (espaço de tela) para criaturas feridas ou em perseguição.
+pub fn draw_creature_bars(creatures: &[Creature], camera: &Camera2D) {
+    for c in creatures.iter().filter(|c| c.is_alive()) {
+        let hurt = c.health_frac() < 1.0;
+        if !hurt && c.state != State::Chase {
+            continue;
+        }
+        let top = c.pos - vec2(0.0, c.species.radius() * 2.8 + 8.0);
+        let at = camera.world_to_screen(top);
+        let (w, h) = (40.0, 5.0);
+        draw_rectangle(at.x - w / 2.0, at.y, w, h, Color::new(0.0, 0.0, 0.0, 0.6));
+        let color = match c.species.temperament() {
+            crate::creatures::Temperament::Aggressive => Color::new(0.9, 0.25, 0.2, 1.0),
+            crate::creatures::Temperament::Passive => Color::new(0.4, 0.85, 0.4, 1.0),
+        };
+        draw_rectangle(at.x - w / 2.0, at.y, w * c.health_frac(), h, color);
+        if c.state == State::Chase {
+            let name = c.species.name();
+            let tw = measure_text(name, None, 16, 1.0).width;
+            draw_text(name, at.x - tw / 2.0, at.y - 3.0, 16.0, Color::new(1.0, 0.8, 0.75, 1.0));
+        }
     }
 }

@@ -180,14 +180,13 @@ impl World {
 
     fn scatter_nodes(&mut self) {
         let mut rng = Rng::new(self.seed.wrapping_add(1));
-        let forest_seed = self.seed.wrapping_add(7);
         for y in 0..self.height as i32 {
             for x in 0..self.width as i32 {
                 let center = vec2((x as f32 + 0.5) * TILE, (y as f32 + 0.5) * TILE);
                 if center.distance(self.spawn) < TILE * 3.0 {
                     continue;
                 }
-                let forest = fbm(x as f32 / 12.0, y as f32 / 12.0, forest_seed, 3);
+                let forest = self.forest(x, y);
                 let kind = match self.tile(x, y) {
                     Tile::Grass => {
                         let tree_p = if forest > 0.55 { 0.22 } else { 0.03 };
@@ -220,6 +219,11 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Densidade de floresta (0..1) no tile; define onde nascem árvores e criaturas de mata.
+    pub fn forest(&self, x: i32, y: i32) -> f32 {
+        fbm(x as f32 / 12.0, y as f32 / 12.0, self.seed.wrapping_add(7), 3)
     }
 
     pub fn tile(&self, x: i32, y: i32) -> Tile {
@@ -351,7 +355,7 @@ impl World {
         self.bags.retain(|b| b.ttl > 0.0 && !b.stacks.is_empty());
 
         for s in &mut self.structures {
-            s.fuel = (s.fuel - dt).max(0.0);
+            s.tick(dt);
         }
 
         for node in &mut self.nodes {
