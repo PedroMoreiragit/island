@@ -1,3 +1,6 @@
+// Em release no Windows, abre só a janela do jogo (sem console).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod crafting;
 mod game;
 mod gathering;

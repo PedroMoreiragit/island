@@ -44,5 +44,6 @@ O modo `ISLAND_SHOT` nunca lê nem grava save. O jogo salva com F5, a cada 60 s 
 - Código e identificadores em inglês; textos do jogo e docs em português (a fonte padrão suporta acentos).
 - Balanceamento (hp de nós, rendimentos, receitas) é dado: mude os números nos módulos acima, não espalhe constantes.
 - Antes de concluir: `cargo test`, `cargo clippy` sem warnings e um `ISLAND_SHOT` para conferir visual quando mexer em render/UI.
+- CI (`.github/workflows/ci.yml`) roda `fmt --check`, `clippy -D warnings` e testes. Publicar uma release no GitHub dispara `release.yml`, que anexa builds de Windows/Linux/macOS.
 
 Planejamento: ver [ROADMAP.md](ROADMAP.md).
