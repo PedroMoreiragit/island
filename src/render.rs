@@ -16,6 +16,7 @@ pub const DEEP_WATER: Color = Color::new(0.09, 0.31, 0.55, 1.0);
 const SHALLOW_WATER: Color = Color::new(0.20, 0.55, 0.74, 1.0);
 const SAND: Color = Color::new(0.89, 0.80, 0.59, 1.0);
 const GRASS: Color = Color::new(0.38, 0.63, 0.28, 1.0);
+const MOUNTAIN: Color = Color::new(0.55, 0.52, 0.48, 1.0);
 const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.22);
 
 fn shade(c: Color, f: f32) -> Color {
@@ -42,6 +43,7 @@ pub fn draw_ground(world: &World, view: Rect, time: f32) {
                 ),
                 Tile::Sand => shade(SAND, variation),
                 Tile::Grass => shade(GRASS, variation),
+                Tile::Mountain => shade(MOUNTAIN, 0.92 + h * 0.14),
             };
             draw_rectangle(px, py, TILE + 0.5, TILE + 0.5, color);
 
@@ -51,6 +53,13 @@ pub fn draw_ground(world: &World, view: Rect, time: f32) {
                     let (gx, gy) = (px + 6.0 + h * 16.0, py + 10.0 + (h * 37.0) % 14.0);
                     draw_line(gx, gy, gx - 2.0, gy - 5.0, 1.5, c);
                     draw_line(gx + 3.0, gy, gx + 4.0, gy - 6.0, 1.5, c);
+                }
+                Tile::Mountain if h > 0.55 => {
+                    // Pedrinhas e rachaduras.
+                    let c = shade(MOUNTAIN, 0.75);
+                    draw_circle(px + 4.0 + h * 22.0, py + 6.0 + (h * 41.0) % 20.0, 1.6, c);
+                    let (cx, cy) = (px + (h * 67.0) % 26.0 + 3.0, py + (h * 29.0) % 24.0 + 4.0);
+                    draw_line(cx, cy, cx + 5.0, cy + 3.0, 1.0, c);
                 }
                 Tile::Sand if h > 0.75 => {
                     draw_circle(px + h * 28.0, py + (h * 53.0) % 28.0, 1.2, shade(SAND, 0.82));
@@ -240,6 +249,7 @@ fn draw_node(node: &ResourceNode, player_pos: Vec2) {
             draw_ellipse(pos.x, pos.y - 6.0, 5.0, 2.0, 0.0, Color::from_rgba(196, 158, 108, 255));
         }
         (NodeKind::Rock, true) => draw_rock(pos, node.variant),
+        (NodeKind::MetalRock, true) => draw_metal_rock(pos, node.variant),
         (NodeKind::Pebble, true) => draw_pebbles(pos, node.variant),
         (NodeKind::Bush, alive) => draw_bush(pos, node.variant, alive),
         _ => {}
@@ -336,6 +346,8 @@ pub fn structure_label(s: &Structure) -> String {
         StructureKind::Workbench => "[F] Usar bancada".to_owned(),
         StructureKind::Campfire if s.is_lit() => "[F] Abrir fogueira (acesa)".to_owned(),
         StructureKind::Campfire => "[F] Abrir fogueira".to_owned(),
+        StructureKind::Forge if s.is_lit() => "[F] Abrir forja (acesa)".to_owned(),
+        StructureKind::Forge => "[F] Abrir forja".to_owned(),
         _ => String::new(),
     }
 }
@@ -409,8 +421,44 @@ fn draw_structure(s: &Structure, time: f32) {
             draw_circle(r.right() - 8.0, base - 25.0, 3.0, stone);
         }
         StructureKind::Campfire => draw_campfire(r, s.is_lit(), time),
+        StructureKind::Forge => draw_forge(r, s.is_lit(), time),
         StructureKind::WoodFoundation => draw_foundation(r),
     }
+}
+
+/// Forja de pedra em 3/4, com a boca brilhando quando acesa.
+fn draw_forge(r: Rect, lit: bool, time: f32) {
+    let top = Color::from_rgba(150, 142, 136, 255);
+    let front = Color::from_rgba(112, 104, 100, 255);
+    let line = Color::from_rgba(80, 74, 70, 255);
+    draw_rectangle(r.x + 2.0, r.y - WALL_H + 4.0, r.w - 4.0, r.h - 6.0, top);
+    let front_y = r.bottom() - WALL_H;
+    draw_rectangle(r.x + 2.0, front_y, r.w - 4.0, WALL_H, front);
+    for row in 0..3 {
+        let y = front_y + row as f32 * 8.0;
+        draw_line(r.x + 2.0, y, r.right() - 2.0, y, 1.0, line);
+    }
+    // Chaminé.
+    draw_rectangle(r.right() - 10.0, r.y - WALL_H - 8.0, 6.0, 12.0, front);
+    let mouth = Rect::new(r.center().x - 7.0, r.bottom() - 13.0, 14.0, 11.0);
+    draw_rectangle(mouth.x, mouth.y, mouth.w, mouth.h, Color::from_rgba(36, 28, 26, 255));
+    if lit {
+        let glow = 0.75 + (time * 9.0).sin() * 0.15;
+        draw_rectangle(
+            mouth.x + 2.0,
+            mouth.y + 4.0,
+            mouth.w - 4.0,
+            mouth.h - 4.0,
+            Color::new(1.0, 0.5 * glow, 0.1, 1.0),
+        );
+        draw_circle(
+            r.right() - 7.0,
+            r.y - WALL_H - 12.0 - (time * 20.0) % 10.0,
+            2.5,
+            Color::new(0.6, 0.6, 0.6, 0.5),
+        );
+    }
+    draw_rectangle_lines(r.x + 2.0, r.y - WALL_H + 4.0, r.w - 4.0, r.h + WALL_H - 6.0, 1.0, line);
 }
 
 /// Bloco em 3/4: face de cima deslocada para cima + face frontal.
@@ -571,6 +619,34 @@ fn draw_rock(pos: Vec2, variant: u8) {
     );
 }
 
+fn draw_metal_rock(pos: Vec2, variant: u8) {
+    let (x, y) = (pos.x, pos.y);
+    let s = 1.0 + variant as f32 * 0.06;
+    draw_ellipse(x, y, 20.0 * s, 7.0, 0.0, SHADOW);
+    draw_ellipse(
+        x,
+        y - 8.0 * s,
+        18.0 * s,
+        12.0 * s,
+        0.0,
+        Color::from_rgba(78, 74, 80, 255),
+    );
+    draw_ellipse(
+        x - 2.0,
+        y - 12.0 * s,
+        14.0 * s,
+        8.0 * s,
+        0.0,
+        Color::from_rgba(104, 98, 104, 255),
+    );
+    // Veios de metal.
+    let vein = Color::from_rgba(196, 120, 70, 255);
+    draw_line(x - 10.0, y - 10.0, x - 2.0, y - 15.0, 2.0, vein);
+    draw_line(x + 2.0, y - 6.0, x + 10.0, y - 12.0, 2.0, vein);
+    draw_circle(x - 6.0, y - 16.0 * s, 1.6, Color::from_rgba(235, 235, 245, 255));
+    draw_circle(x + 7.0, y - 9.0, 1.2, Color::from_rgba(235, 235, 245, 255));
+}
+
 fn draw_pebbles(pos: Vec2, variant: u8) {
     let c = Color::from_rgba(130, 128, 132, 255);
     let hi = Color::from_rgba(170, 168, 172, 255);
@@ -652,6 +728,24 @@ fn draw_held_item(item: ItemId, hand: Vec2, dir: Vec2) {
             draw_line(hand.x, hand.y, tip.x, tip.y, 2.0, wood);
             let head = tip - dir * 2.0 + perp * 3.0;
             draw_circle(head.x, head.y, 4.0, stone);
+        }
+        ItemId::MetalPickaxe => {
+            let tip = hand + dir * 14.0;
+            draw_line(hand.x, hand.y, tip.x, tip.y, 2.0, wood);
+            let (a, b) = (tip + perp * 7.0 - dir * 2.0, tip - perp * 7.0 - dir * 2.0);
+            draw_line(a.x, a.y, b.x, b.y, 3.0, Color::from_rgba(200, 206, 216, 255));
+        }
+        ItemId::MetalHatchet => {
+            let tip = hand + dir * 13.0;
+            draw_line(hand.x, hand.y, tip.x, tip.y, 2.0, wood);
+            let head = tip - dir * 2.0 + perp * 3.0;
+            draw_circle(head.x, head.y, 4.5, Color::from_rgba(200, 206, 216, 255));
+        }
+        ItemId::MetalSword => {
+            let tip = hand + dir * 22.0;
+            draw_line(hand.x, hand.y, tip.x, tip.y, 2.5, Color::from_rgba(210, 216, 226, 255));
+            let (a, b) = (hand + dir * 3.0 + perp * 4.0, hand + dir * 3.0 - perp * 4.0);
+            draw_line(a.x, a.y, b.x, b.y, 2.0, Color::from_rgba(150, 120, 60, 255));
         }
         ItemId::WoodenClub => {
             let tip = hand + dir * 12.0;

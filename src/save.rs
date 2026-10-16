@@ -10,6 +10,7 @@ use crate::building::Structure;
 use crate::crafting::CraftQueue;
 use crate::creatures::CreatureSave;
 use crate::inventory::Stack;
+use crate::progression::Progression;
 use crate::vitals::Vitals;
 use crate::world::BagKind;
 
@@ -36,6 +37,9 @@ pub struct SaveData {
     /// `None` em saves anteriores à v0.4 (a fauna é gerada do zero).
     #[serde(default)]
     pub creatures: Option<Vec<CreatureSave>>,
+    /// `None` em saves anteriores à v0.6 (receitas antigas liberadas, nível 1).
+    #[serde(default)]
+    pub progression: Option<Progression>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +107,7 @@ mod tests {
                 &crate::creatures::Creature::new(crate::creatures::Species::Raptor, macroquad::math::vec2(5.0, 6.0))
                     .with_level(3),
             )]),
+            progression: Some(Progression::default()),
         };
         let path = std::env::temp_dir().join(format!("island-test-{}/save.json", std::process::id()));
         write(&path, &data).unwrap();
@@ -123,5 +128,6 @@ mod tests {
         let data: SaveData = serde_json::from_str(json).unwrap();
         assert!(data.structures.is_empty() && data.craft_queue.jobs.is_empty());
         assert!(data.creatures.is_none());
+        assert!(data.progression.is_none());
     }
 }

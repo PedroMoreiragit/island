@@ -13,11 +13,12 @@ use crate::gathering;
 use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, Stack};
 use crate::items::{ItemId, ToolKind};
 use crate::player::{self, Facing, Player};
+use crate::progression::{self, LearnError, Progression};
 use crate::render::{self, POPUP_LIFETIME, Popup, PopupStyle};
 use crate::rng::Rng;
 use crate::save::{self, BagSave, SAVE_VERSION, SaveData};
 use crate::ui::{self, ContainerRef, ContainerView, PanelKind, UiAction, UiState};
-use crate::vitals::{self, MAX_FOOD, MAX_WATER, Vitals};
+use crate::vitals::{self, Vitals};
 use crate::world::{BagKind, GroundBag, Tile, World};
 
 const MAP_SIZE: usize = 160;
@@ -54,6 +55,7 @@ pub struct Game {
     world: World,
     player: Player,
     vitals: Vitals,
+    progression: Progression,
     dead: bool,
     inventory: Inventory,
     hotbar_selected: usize,
@@ -96,6 +98,7 @@ impl Game {
             world,
             player,
             vitals: Vitals::full(),
+            progression: Progression::default(),
             dead: false,
             inventory: Inventory::new(INVENTORY_SIZE),
             hotbar_selected: 0,
@@ -124,6 +127,9 @@ impl Game {
         game.camera_pos = game.player.pos;
         game.vitals = data.vitals;
         game.dead = data.vitals.is_dead();
+        // Saves anteriores à v0.6 não têm progressão: liberam as receitas que já existiam.
+        game.progression = data.progression.unwrap_or_else(Progression::legacy);
+        game.vitals.set_max(game.progression.maxima());
         for (slot, saved) in game.inventory.slots.iter_mut().zip(data.inventory) {
             *slot = saved;
         }
@@ -200,6 +206,7 @@ impl Game {
             structures: self.world.structures.clone(),
             craft_queue: self.queue.clone(),
             creatures: Some(self.creatures.iter().map(CreatureSave::from).collect()),
+            progression: Some(self.progression.clone()),
         }
     }
 
@@ -232,10 +239,58 @@ impl Game {
             (ItemId::Narcotic, 5),
             (ItemId::WoodenClub, 1),
             (ItemId::Slingshot, 1),
+            (ItemId::MetalOre, 20),
+            (ItemId::MetalIngot, 10),
         ] {
             self.inventory.add(item, n);
         }
         self.notify("Itens de debug adicionados");
+    }
+
+    /// XP de debug (F4 em builds de debug; também usado nos screenshots).
+    pub fn debug_xp(&mut self, amount: u32) {
+        self.gain_xp(amount);
+    }
+
+    /// Leva o jogador para a montanha, com uma forja acesa fundindo metal (para screenshots).
+    pub fn demo_mountain(&mut self) {
+        let Some(node) = self
+            .world
+            .nodes
+            .iter()
+            .find(|n| n.kind == crate::world::NodeKind::MetalRock)
+        else {
+            return;
+        };
+        let target = node.pos;
+        // Um ponto livre perto da rocha de metal.
+        let spot = (1..6)
+            .flat_map(|r| {
+                [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)].map(|d| target + d * 24.0 * r as f32)
+            })
+            .find(|&p| !self.world.blocked(p, player::RADIUS));
+        let Some(spot) = spot else { return };
+        self.player.pos = spot;
+        self.camera_pos = spot;
+        self.creatures.clear();
+        let (tx, ty) = building::tile_of(spot);
+        let candidates = [(tx + 2, ty), (tx - 2, ty), (tx, ty + 2), (tx, ty - 2)];
+        if let Some(&tile) = candidates.iter().find(|&&t| {
+            self.world
+                .can_place(StructureKind::Forge, t, spot, player::RADIUS)
+                .is_ok()
+        }) {
+            self.world.place(StructureKind::Forge, tile);
+            let i = self.world.structures.len() - 1;
+            let forge = &mut self.world.structures[i];
+            if let Some(storage) = forge.storage.as_mut() {
+                storage.add(ItemId::Wood, 5);
+                storage.add(ItemId::MetalOre, 6);
+            }
+            forge.toggle_fire();
+            forge.cook = 4.0;
+        }
+        self.inventory.add(ItemId::MetalPickaxe, 1);
     }
 
     pub fn open_inventory(&mut self) {
@@ -386,6 +441,21 @@ impl Game {
             Some(last) if last.0 == msg => last.1 = MESSAGE_TTL,
             _ => self.messages.push((msg, MESSAGE_TTL)),
         }
+    }
+
+    /// Soma XP e anuncia subidas de nível.
+    fn gain_xp(&mut self, amount: u32) {
+        let gained = self.progression.add_xp(amount);
+        if gained == 0 {
+            return;
+        }
+        let level = self.progression.level;
+        self.notify(format!(
+            "Nível {level}! +{gained} ponto(s) de atributo, +{} de engrama (Tab)",
+            gained * progression::ENGRAM_POINTS_PER_LEVEL
+        ));
+        let at = self.player.pos - vec2(0.0, 48.0);
+        self.popup(at, format!("Nível {level}!"));
     }
 
     fn popup(&mut self, pos: Vec2, text: String) {
@@ -542,13 +612,16 @@ impl Game {
                 self.time += daynight::DAY_LENGTH / 8.0;
                 self.notify("+3 horas");
             }
+            if is_key_pressed(KeyCode::F4) {
+                self.gain_xp(200);
+            }
         }
 
         self.update_hotbar_keys();
 
         let container = match self.ui.container {
             Some(ContainerRef::Structure(i)) => self.world.structures.get_mut(i).and_then(|s| {
-                let kind = if s.kind == StructureKind::Campfire {
+                let kind = if s.kind.process().is_some() {
                     PanelKind::Campfire
                 } else {
                     PanelKind::Storage
@@ -580,6 +653,11 @@ impl Game {
                     && let Some(c) = self.creature_mut(id)
                 {
                     c.toggle_command();
+                }
+            }
+            Some(UiAction::SpendAttribute(attr)) => {
+                if self.progression.spend(attr) {
+                    self.vitals.set_max(self.progression.maxima());
                 }
             }
             Some(UiAction::Mount) => {
@@ -665,6 +743,8 @@ impl Game {
     /// Entrega o que a fila de crafting terminou; se não couber, cai no chão.
     fn deliver_crafts(&mut self, dt: f32) {
         for stack in self.queue.tick(dt) {
+            let secs = crate::crafting::recipe_for(stack.item).map_or(0.0, |r| r.secs);
+            self.gain_xp((secs * progression::XP_CRAFT_PER_SEC).round() as u32);
             let name = stack.item.name();
             match self.inventory.insert_stack(stack) {
                 None => self.notify(format!("Fabricado: {name}")),
@@ -787,6 +867,7 @@ impl Game {
             }
             Event::Tamed { bonus_levels } => {
                 let level = c.level;
+                self.gain_xp(progression::xp_tame(level));
                 self.notify(format!("{name} domesticado! Nv {level} (+{bonus_levels} de bônus)"));
                 self.popup(pos - vec2(0.0, 30.0), "Domesticado!".to_owned());
             }
@@ -825,7 +906,10 @@ impl Game {
     /// Mensagens e números flutuantes de um golpe numa criatura.
     fn report_hit(&mut self, i: usize, damage: f32, hit: Hit) {
         let c = &self.creatures[i];
-        let (pos, species) = (c.pos, c.species);
+        let (pos, species, level) = (c.pos, c.species, c.level);
+        if hit == Hit::Died {
+            self.gain_xp(progression::xp_kill(level));
+        }
         if damage > 0.0 {
             self.popup_styled(pos - vec2(0.0, 30.0), format!("-{damage:.0}"), PopupStyle::Damage);
         }
@@ -1056,7 +1140,7 @@ impl Game {
     fn hit_creature(&mut self, i: usize) {
         let held = self.equipped();
         let tool = self.equipped_tool();
-        let damage = ItemId::melee_damage(held);
+        let damage = ItemId::melee_damage(held) * self.progression.melee_mult();
         let torpor = ItemId::melee_torpor(held);
         let player_pos = self.player.pos;
         let c = &mut self.creatures[i];
@@ -1078,8 +1162,10 @@ impl Game {
         if matches!(tool, Some(ToolKind::Pickaxe | ToolKind::Hatchet)) {
             self.wear_equipped();
         }
-        let drops = gathering::roll_corpse_yield(species, tool, &mut self.rng);
+        let tier = ItemId::tool_tier(held);
+        let drops = gathering::roll_corpse_yield(species, tool, tier, &mut self.rng);
         self.give_drops(pos, drops);
+        self.gain_xp(progression::XP_GATHER);
     }
 
     fn hit_node(&mut self, idx: usize) {
@@ -1097,7 +1183,11 @@ impl Game {
         if matches!(tool, Some(ToolKind::Pickaxe | ToolKind::Hatchet)) {
             self.wear_equipped();
         }
-        let drops = gathering::roll_yield(kind, tool, &mut self.rng);
+        let tier = ItemId::tool_tier(self.equipped());
+        let drops = gathering::roll_yield(kind, tool, tier, &mut self.rng);
+        if !drops.is_empty() {
+            self.gain_xp(progression::XP_GATHER);
+        }
         self.give_drops(pos, drops);
     }
 
@@ -1118,7 +1208,7 @@ impl Game {
     }
 
     fn drink(&mut self) {
-        if self.vitals.water >= MAX_WATER - 0.5 {
+        if self.vitals.water >= self.vitals.max.water - 0.5 {
             self.notify("Você não está com sede");
             return;
         }
@@ -1131,7 +1221,7 @@ impl Game {
     fn use_selected(&mut self) {
         let Some(item) = self.equipped() else { return };
         let Some(effect) = item.food_effect() else { return };
-        if self.vitals.food >= MAX_FOOD - 0.5 {
+        if self.vitals.food >= self.vitals.max.food - 0.5 {
             self.notify("Você está satisfeito");
             return;
         }
@@ -1224,7 +1314,7 @@ impl Game {
             Interaction::Bag(i) => self.pick_up(i),
             Interaction::Structure(i) => match self.world.structures[i].kind {
                 StructureKind::WoodDoor => self.toggle_door(i),
-                StructureKind::StorageBox | StructureKind::Campfire => {
+                StructureKind::StorageBox | StructureKind::Campfire | StructureKind::Forge => {
                     self.ui.container = Some(ContainerRef::Structure(i));
                     self.ui.inventory_open = true;
                 }
@@ -1300,13 +1390,28 @@ impl Game {
     fn respawn(&mut self) {
         self.player = Player::new(self.world.spawn);
         self.camera_pos = self.player.pos;
-        self.vitals = Vitals::full();
+        self.vitals = Vitals::full_with(self.progression.maxima());
         self.dead = false;
         self.notify("Você renasceu na praia. Recupere sua bolsa!");
     }
 
     fn craft(&mut self, index: usize) {
         let recipe = &RECIPES[index];
+        if !self.progression.knows(recipe.output) {
+            match self.progression.learn(recipe) {
+                Ok(()) => self.notify(format!(
+                    "Engrama aprendido: {} (-{} pontos)",
+                    recipe.output.name(),
+                    recipe.engram_cost
+                )),
+                Err(LearnError::LevelTooLow(level)) => self.notify(format!("Requer nível {level}")),
+                Err(LearnError::NotEnoughPoints(cost)) => {
+                    self.notify(format!("Faltam pontos de engrama (custa {cost})"));
+                }
+                Err(LearnError::AlreadyKnown) => {}
+            }
+            return;
+        }
         let station_near = self.station_ok(recipe);
         match self.queue.enqueue(&mut self.inventory, recipe, station_near) {
             Ok(()) => {}
@@ -1421,6 +1526,7 @@ impl Game {
             inventory: &self.inventory,
             container,
             mount: self.mounted(),
+            progression: &self.progression,
             hurt: self.hurt_flash,
             queue: &self.queue,
             station_ok: &|recipe| self.station_ok(recipe),
@@ -1630,6 +1736,57 @@ mod tests {
         assert_eq!(game.mount, None);
         assert!(!game.creature(id).unwrap().mounted);
         assert_ne!(game.player.pos, game.creature(id).unwrap().pos);
+    }
+
+    #[test]
+    fn gathering_gives_xp_and_level_ups_grant_points() {
+        let mut game = Game::new(1337);
+        let tree = game
+            .world
+            .nodes
+            .iter()
+            .position(|n| n.kind == crate::world::NodeKind::Tree)
+            .unwrap();
+        game.hit_node(tree);
+        assert_eq!(game.progression.xp, progression::XP_GATHER);
+        game.gain_xp(10_000);
+        assert!(game.progression.level > 1 && game.progression.attribute_points > 0);
+    }
+
+    #[test]
+    fn attribute_points_raise_max_health() {
+        let mut game = Game::new(1337);
+        game.progression.attribute_points = 1;
+        assert!(game.progression.spend(crate::progression::Attribute::Health));
+        game.vitals.set_max(game.progression.maxima());
+        assert_eq!(game.vitals.max.health, 110.0);
+        assert_eq!(game.vitals.health, 110.0, "o aumento já vem cheio");
+    }
+
+    #[test]
+    fn locked_recipes_are_learned_before_crafting() {
+        let mut game = Game::new(1337);
+        let wall = RECIPES.iter().position(|r| r.output == ItemId::WoodWall).unwrap();
+        assert!(!game.progression.knows(ItemId::WoodWall));
+        game.craft(wall);
+        assert!(!game.progression.knows(ItemId::WoodWall), "nível baixo");
+        game.gain_xp(5_000);
+        game.craft(wall);
+        assert!(
+            game.progression.knows(ItemId::WoodWall),
+            "aprendeu com pontos de engrama"
+        );
+        assert!(game.queue.jobs.is_empty(), "aprender não fabrica");
+    }
+
+    #[test]
+    fn old_saves_unlock_old_recipes() {
+        let game = Game::new(5);
+        let mut saved = game.to_save();
+        saved.progression = None;
+        let loaded = Game::from_save(saved);
+        assert!(loaded.progression.knows(ItemId::RaptorSaddle));
+        assert!(!loaded.progression.knows(ItemId::Forge));
     }
 
     #[test]

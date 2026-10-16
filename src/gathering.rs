@@ -6,7 +6,16 @@ use crate::items::{ItemId, ToolKind};
 use crate::rng::Rng;
 use crate::world::NodeKind;
 
-pub fn roll_yield(kind: NodeKind, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<(ItemId, u32)> {
+/// Ferramentas de tier 2 (metal) rendem o dobro.
+fn apply_tier(drops: Vec<(ItemId, u32)>, tier: u32) -> Vec<(ItemId, u32)> {
+    drops.into_iter().map(|(item, n)| (item, n * tier.max(1))).collect()
+}
+
+pub fn roll_yield(kind: NodeKind, tool: Option<ToolKind>, tier: u32, rng: &mut Rng) -> Vec<(ItemId, u32)> {
+    apply_tier(roll_base_yield(kind, tool, rng), tier)
+}
+
+fn roll_base_yield(kind: NodeKind, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<(ItemId, u32)> {
     let mut drops = Vec::new();
     let mut push = |item, n| {
         if n > 0 {
@@ -44,12 +53,25 @@ pub fn roll_yield(kind: NodeKind, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<
             push(ItemId::Stone, 1);
             push(ItemId::Flint, rng.range_u32(2, 3));
         }
+        // Metal só sai bem com picareta.
+        (NodeKind::MetalRock, Some(ToolKind::Pickaxe)) => {
+            push(ItemId::MetalOre, rng.range_u32(1, 2));
+            push(ItemId::Stone, 1);
+        }
+        (NodeKind::MetalRock, Some(ToolKind::Hatchet)) => {
+            push(ItemId::Stone, rng.range_u32(2, 3));
+            push(ItemId::MetalOre, u32::from(rng.chance(0.3)));
+        }
+        (NodeKind::MetalRock, _) => {
+            push(ItemId::Stone, 1);
+            push(ItemId::MetalOre, u32::from(rng.chance(0.1)));
+        }
     }
     drops
 }
 
 /// O que cada golpe numa carcaça rende. Machado favorece carne; picareta, couro.
-pub fn roll_corpse_yield(species: Species, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<(ItemId, u32)> {
+pub fn roll_corpse_yield(species: Species, tool: Option<ToolKind>, tier: u32, rng: &mut Rng) -> Vec<(ItemId, u32)> {
     let big = u32::from(species.is_big());
     let tool = tool.filter(|t| *t != ToolKind::Spear);
     let (meat, hide) = match tool {
@@ -57,15 +79,29 @@ pub fn roll_corpse_yield(species: Species, tool: Option<ToolKind>, rng: &mut Rng
         Some(_) => (u32::from(rng.chance(0.5)), rng.range_u32(2, 3) + big),
         None => (1, u32::from(rng.chance(0.3))),
     };
-    [(ItemId::RawMeat, meat), (ItemId::Hide, hide)]
+    let drops = [(ItemId::RawMeat, meat), (ItemId::Hide, hide)]
         .into_iter()
         .filter(|&(_, n)| n > 0)
-        .collect()
+        .collect();
+    apply_tier(drops, tier)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metal_rock_needs_a_pickaxe_and_metal_tools_double() {
+        let mut rng = Rng::new(3);
+        for _ in 0..50 {
+            let pick = roll_yield(NodeKind::MetalRock, Some(ToolKind::Pickaxe), 1, &mut rng);
+            assert!(total(&pick, ItemId::MetalOre) >= 1);
+            let metal = roll_yield(NodeKind::MetalRock, Some(ToolKind::Pickaxe), 2, &mut rng);
+            assert!(total(&metal, ItemId::MetalOre) >= 2);
+            let hand = roll_yield(NodeKind::MetalRock, None, 1, &mut rng);
+            assert!(total(&hand, ItemId::MetalOre) <= 1);
+        }
+    }
 
     fn total(drops: &[(ItemId, u32)], item: ItemId) -> u32 {
         drops.iter().filter(|d| d.0 == item).map(|d| d.1).sum()
@@ -75,10 +111,10 @@ mod tests {
     fn tools_beat_bare_hands() {
         let mut rng = Rng::new(1);
         for _ in 0..50 {
-            let hand = roll_yield(NodeKind::Tree, None, &mut rng);
-            let hatchet = roll_yield(NodeKind::Tree, Some(ToolKind::Hatchet), &mut rng);
+            let hand = roll_yield(NodeKind::Tree, None, 1, &mut rng);
+            let hatchet = roll_yield(NodeKind::Tree, Some(ToolKind::Hatchet), 1, &mut rng);
             assert!(total(&hatchet, ItemId::Wood) > total(&hand, ItemId::Wood));
-            let pick = roll_yield(NodeKind::Rock, Some(ToolKind::Pickaxe), &mut rng);
+            let pick = roll_yield(NodeKind::Rock, Some(ToolKind::Pickaxe), 1, &mut rng);
             assert!(total(&pick, ItemId::Flint) >= 2);
         }
     }
@@ -87,9 +123,9 @@ mod tests {
     fn hatchet_gives_meat_and_pickaxe_gives_hide() {
         let mut rng = Rng::new(2);
         for _ in 0..50 {
-            let hatchet = roll_corpse_yield(Species::Raptor, Some(ToolKind::Hatchet), &mut rng);
-            let pick = roll_corpse_yield(Species::Raptor, Some(ToolKind::Pickaxe), &mut rng);
-            let hand = roll_corpse_yield(Species::Raptor, None, &mut rng);
+            let hatchet = roll_corpse_yield(Species::Raptor, Some(ToolKind::Hatchet), 1, &mut rng);
+            let pick = roll_corpse_yield(Species::Raptor, Some(ToolKind::Pickaxe), 1, &mut rng);
+            let hand = roll_corpse_yield(Species::Raptor, None, 1, &mut rng);
             assert!(total(&hatchet, ItemId::RawMeat) > total(&hand, ItemId::RawMeat));
             assert!(total(&pick, ItemId::Hide) > total(&hand, ItemId::Hide));
         }

@@ -5,7 +5,7 @@ use macroquad::prelude::*;
 
 use crate::building::{self, Layer, PlaceError, Structure, StructureKind};
 use crate::inventory::Stack;
-use crate::rng::{Rng, fbm};
+use crate::rng::{Rng, fbm, hash2};
 
 pub const TILE: f32 = 32.0;
 
@@ -15,6 +15,8 @@ pub enum Tile {
     ShallowWater,
     Sand,
     Grass,
+    /// Interior rochoso da ilha, com metal.
+    Mountain,
 }
 
 impl Tile {
@@ -23,13 +25,14 @@ impl Tile {
     }
 
     pub fn is_land(self) -> bool {
-        matches!(self, Tile::Sand | Tile::Grass)
+        matches!(self, Tile::Sand | Tile::Grass | Tile::Mountain)
     }
 
     pub fn speed_factor(self) -> f32 {
         match self {
             Tile::ShallowWater => 0.55,
             Tile::Sand => 0.9,
+            Tile::Mountain => 0.85,
             _ => 1.0,
         }
     }
@@ -41,6 +44,7 @@ pub enum NodeKind {
     Rock,
     Pebble,
     Bush,
+    MetalRock,
 }
 
 impl NodeKind {
@@ -51,6 +55,7 @@ impl NodeKind {
             NodeKind::Rock => 10,
             NodeKind::Pebble => 1,
             NodeKind::Bush => 3,
+            NodeKind::MetalRock => 12,
         }
     }
 
@@ -60,6 +65,7 @@ impl NodeKind {
             NodeKind::Rock => 120.0,
             NodeKind::Pebble => 45.0,
             NodeKind::Bush => 60.0,
+            NodeKind::MetalRock => 180.0,
         }
     }
 
@@ -67,7 +73,7 @@ impl NodeKind {
     pub fn collision_radius(self) -> f32 {
         match self {
             NodeKind::Tree => 9.0,
-            NodeKind::Rock => 16.0,
+            NodeKind::Rock | NodeKind::MetalRock => 16.0,
             NodeKind::Pebble | NodeKind::Bush => 0.0,
         }
     }
@@ -143,6 +149,10 @@ impl World {
                     h if h < 0.18 => Tile::DeepWater,
                     h if h < 0.27 => Tile::ShallowWater,
                     h if h < 0.36 => Tile::Sand,
+                    // Montanha: partes altas do interior (não consome RNG, então saves antigos batem).
+                    h if h > 0.6 && fbm(x as f32 / 16.0, y as f32 / 16.0, seed.wrapping_add(13), 3) > 0.48 => {
+                        Tile::Mountain
+                    }
                     _ => Tile::Grass,
                 });
             }
@@ -187,8 +197,11 @@ impl World {
                     continue;
                 }
                 let forest = self.forest(x, y);
-                let kind = match self.tile(x, y) {
-                    Tile::Grass => {
+                let tile = self.tile(x, y);
+                let kind = match tile {
+                    // A montanha segue a mesma sequência do RNG da grama (mantém os índices dos nós
+                    // iguais aos de saves antigos); só o tipo do nó muda depois.
+                    Tile::Grass | Tile::Mountain => {
                         let tree_p = if forest > 0.55 { 0.22 } else { 0.03 };
                         if rng.chance(tree_p) {
                             Some(NodeKind::Tree)
@@ -206,6 +219,11 @@ impl World {
                     Tile::Sand if rng.chance(0.004) => Some(NodeKind::Rock),
                     _ => None,
                 };
+                let kind = if tile == Tile::Mountain {
+                    kind.map(|k| mountain_node(k, hash2(x, y, self.seed.wrapping_add(21))))
+                } else {
+                    kind
+                };
                 if let Some(kind) = kind {
                     let jitter = vec2(rng.range(-8.0, 8.0), rng.range(-8.0, 8.0));
                     self.nodes.push(ResourceNode {
@@ -219,9 +237,43 @@ impl World {
                 }
             }
         }
+        self.scatter_mountain_extras();
+    }
+
+    /// Rochas extras na montanha, com RNG próprio e adicionadas no fim da lista: os índices dos nós
+    /// anteriores continuam iguais aos de saves antigos.
+    fn scatter_mountain_extras(&mut self) {
+        let mut rng = Rng::new(self.seed.wrapping_add(31));
+        for y in 0..self.height as i32 {
+            for x in 0..self.width as i32 {
+                if self.tile(x, y) != Tile::Mountain {
+                    continue;
+                }
+                let kind = if rng.chance(0.07) {
+                    NodeKind::MetalRock
+                } else if rng.chance(0.03) {
+                    NodeKind::Rock
+                } else {
+                    continue;
+                };
+                let center = vec2((x as f32 + 0.5) * TILE, (y as f32 + 0.5) * TILE);
+                if self.nodes.iter().any(|n| n.pos.distance(center) < TILE) {
+                    continue;
+                }
+                self.nodes.push(ResourceNode {
+                    kind,
+                    pos: center,
+                    hp: kind.max_hp(),
+                    respawn_timer: 0.0,
+                    variant: (rng.next_u64() % 4) as u8,
+                    shake: 0.0,
+                });
+            }
+        }
     }
 
     /// Densidade de floresta (0..1) no tile; define onde nascem árvores e criaturas de mata.
+    /// (Na montanha, o que seria árvore vira rocha.)
     pub fn forest(&self, x: i32, y: i32) -> f32 {
         fbm(x as f32 / 12.0, y as f32 / 12.0, self.seed.wrapping_add(7), 3)
     }
@@ -310,7 +362,7 @@ impl World {
         self.structures
             .iter()
             .filter(|s| s.is_lit())
-            .map(|s| (s.rect().center() + vec2(0.0, 6.0), building::CAMPFIRE_LIGHT))
+            .map(|s| (s.rect().center() + vec2(0.0, 6.0), s.light_radius()))
     }
 
     pub fn drop_bag(&mut self, pos: Vec2, stacks: Vec<Stack>, kind: BagKind) {
@@ -372,6 +424,17 @@ impl World {
     }
 }
 
+/// Na montanha, árvores e arbustos viram rochas, rochas de metal e pedrinhas.
+fn mountain_node(kind: NodeKind, roll: f32) -> NodeKind {
+    match kind {
+        NodeKind::Tree if roll < 0.3 => NodeKind::MetalRock,
+        NodeKind::Tree if roll < 0.55 => NodeKind::Rock,
+        NodeKind::Rock if roll < 0.5 => NodeKind::MetalRock,
+        NodeKind::Tree | NodeKind::Bush => NodeKind::Pebble,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +449,13 @@ mod tests {
         assert!(count(NodeKind::Rock) > 5);
         assert!(count(NodeKind::Pebble) > 20);
         assert!(count(NodeKind::Bush) > 20);
+        let mountain = (0..160)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .filter(|&(x, y)| world.tile(x, y) == Tile::Mountain)
+            .count();
+        let metal = count(NodeKind::MetalRock);
+        assert!(mountain > 100, "deveria haver montanha: {mountain} tiles");
+        assert!(metal > 10, "montanha com metal: {metal} rochas em {mountain} tiles");
     }
 
     #[test]

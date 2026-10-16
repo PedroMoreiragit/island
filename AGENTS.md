@@ -8,7 +8,7 @@ Survival 2D em Rust inspirado em ARK (coleta, crafting, construção, fauna e do
 
 ## Comandos
 ```
-cargo run                 # jogar (debug: F1 = itens de teste, F2 = -25 de vida, F3 = +3 horas)
+cargo run                 # jogar (debug: F1 = itens de teste, F2 = -25 de vida, F3 = +3 horas, F4 = +200 XP)
 cargo test                # testes de lógica (inventário, crafting, coleta, mundo)
 cargo fmt && cargo clippy -- -D warnings   # rustfmt.toml: max_width 120
 ISLAND_SHOT=out.png cargo run                          # smoke test: salva screenshot e sai
@@ -20,6 +20,7 @@ ISLAND_SHOT=out.png ISLAND_SHOT_FIRE=1 cargo run       # painel da fogueira
 ISLAND_SHOT=out.png ISLAND_SHOT_TAME=1 cargo run       # raptor desacordado + painel de domesticação
 ISLAND_SHOT=out.png ISLAND_SHOT_RIDE=1 cargo run       # jogador montado, dodô seguindo, dilo desacordado
 ISLAND_SHOT=out.png ISLAND_SHOT_PET=1 cargo run        # painel do raptor domesticado
+ISLAND_SHOT=out.png ISLAND_SHOT_MOUNTAIN=1 cargo run   # montanha com metal e forja acesa
 ISLAND_NEW=1 ISLAND_SEED=42 cargo run  # ignora o save e gera outra ilha
 ISLAND_SAVE=outro.json cargo run       # caminho do save (padrão: saves/save.json)
 ```
@@ -32,11 +33,12 @@ O modo `ISLAND_SHOT` nunca lê nem grava save. O jogo salva com F5, a cada 60 s 
 | `game.rs` | Estado (`Game`), loop update/draw, câmera. Só orquestra. |
 | `world.rs` | Tiles da ilha, geração procedural, nós de recurso, colisão. |
 | `player.rs` | Movimento, corrida, facing esquerda/direita, timers de golpe. |
-| `vitals.rs` | Vida, comida, água, stamina: drenagem, dano por fome/sede, regeneração. |
+| `vitals.rs` | Vida, comida, água, stamina (máximos por jogador): drenagem, dano por fome/sede, regeneração. |
+| `progression.rs` | XP, nível, pontos de atributo e engramas (receitas aprendidas). |
 | `items.rs` | `ItemId`: nome, pilha máxima, ferramenta, durabilidade, efeito de comida. |
 | `inventory.rs` | Slots com empilhamento e durabilidade; slots `0..HOTBAR_SIZE` são a hotbar. |
-| `crafting.rs` | Receitas (`RECIPES`, tempo, estação) e fila de crafting (`CraftQueue`). |
-| `building.rs` | Estruturas no grid (piso/objeto), colisão, fogueira (combustível, cozimento), alcances. |
+| `crafting.rs` | Receitas (`RECIPES`: tempo, estação, nível e custo de engrama) e fila de crafting (`CraftQueue`). |
+| `building.rs` | Estruturas no grid (piso/objeto), colisão, fogo (fogueira cozinha, forja funde), alcances. |
 | `daynight.rs` | Relógio do jogo e curvas de escuridão/entardecer. |
 | `gathering.rs` | Rendimento por golpe (nó/carcaça × ferramenta). |
 | `creatures.rs` | Espécies, níveis, IA, torpor/desmaio, domesticados (seguir/ficar/montaria), spawn por bioma. |
@@ -51,6 +53,7 @@ O modo `ISLAND_SHOT` nunca lê nem grava save. O jogo salva com F5, a cada 60 s 
 - Regras de jogo ficam em módulos puros (sem chamadas de desenho/input) e têm testes; `render.rs`/`ui.rs` só leem estado.
 - Coordenadas de mundo em pixels, Y para baixo, `TILE = 32`. `pos` de entidade = ponto do pé (base), usado no y-sort e na colisão.
 - Item novo: variante em `ItemId` + seus `match` em `items.rs` + ícone em `ui::draw_item_icon` (o `match` exaustivo força isso).
+- Geração do mundo: não mude a sequência do RNG de `scatter_nodes` (saves guardam nós por índice). Nós novos vão no fim, com RNG próprio (ver `scatter_mountain_extras`).
 - Save: o mundo é regenerado pela seed e só o estado mutável vai para `SaveData`. Campo novo no save leva `#[serde(default)]`; mudar a geração do mundo ou quebrar o formato exige incrementar `SAVE_VERSION`.
 - Espécie nova: variante em `Species` + seus `match` em `creatures.rs` + desenho em `render::draw_creature`.
 - Criaturas são referenciadas por `id` estável (`Creature::id`), nunca por índice guardado: o vetor perde carcaças a cada frame.

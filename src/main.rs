@@ -11,6 +11,7 @@ mod gathering;
 mod inventory;
 mod items;
 mod player;
+mod progression;
 mod render;
 mod rng;
 mod save;
@@ -65,13 +66,18 @@ async fn main() {
     // ISLAND_SHOT_FIRE=1 monta a cabana e abre o painel da fogueira;
     // ISLAND_SHOT_TAME=1 mostra um raptor desacordado com o painel de domesticação;
     // ISLAND_SHOT_RIDE=1 mostra o jogador montado num raptor, com um dodô domesticado e um dilo desacordado;
-    // ISLAND_SHOT_PET=1 abre o painel do raptor domesticado.
+    // ISLAND_SHOT_PET=1 abre o painel do raptor domesticado;
+    // ISLAND_SHOT_MOUNTAIN=1 leva à montanha, perto de metal, com uma forja acesa.
     let shot = env("ISLAND_SHOT");
     let mut game = if shot.is_some() {
         let mut game = Game::new(seed);
         if env("ISLAND_SHOT_INVENTORY").is_some() {
             game.give_debug_items();
+            game.debug_xp(1500);
             game.open_inventory();
+        }
+        if env("ISLAND_SHOT_MOUNTAIN").is_some() {
+            game.demo_mountain();
         }
         if env("ISLAND_SHOT_CREATURES").is_some() {
             game.spawn_demo_creatures();

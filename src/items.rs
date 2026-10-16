@@ -14,14 +14,20 @@ pub enum ItemId {
     RawMeat,
     CookedMeat,
     Hide,
+    MetalOre,
+    MetalIngot,
     StonePickaxe,
     StoneHatchet,
     WoodenSpear,
+    MetalPickaxe,
+    MetalHatchet,
+    MetalSword,
     WoodenClub,
     Slingshot,
     Narcotic,
     RaptorSaddle,
     Campfire,
+    Forge,
     Workbench,
     StorageBox,
     WoodFoundation,
@@ -45,7 +51,7 @@ pub struct FoodEffect {
 
 impl ItemId {
     #[cfg(test)]
-    pub const ALL: [ItemId; 21] = [
+    pub const ALL: [ItemId; 27] = [
         ItemId::Wood,
         ItemId::Thatch,
         ItemId::Stone,
@@ -54,14 +60,20 @@ impl ItemId {
         ItemId::RawMeat,
         ItemId::CookedMeat,
         ItemId::Hide,
+        ItemId::MetalOre,
+        ItemId::MetalIngot,
         ItemId::StonePickaxe,
         ItemId::StoneHatchet,
         ItemId::WoodenSpear,
+        ItemId::MetalPickaxe,
+        ItemId::MetalHatchet,
+        ItemId::MetalSword,
         ItemId::WoodenClub,
         ItemId::Slingshot,
         ItemId::Narcotic,
         ItemId::RaptorSaddle,
         ItemId::Campfire,
+        ItemId::Forge,
         ItemId::Workbench,
         ItemId::StorageBox,
         ItemId::WoodFoundation,
@@ -79,6 +91,12 @@ impl ItemId {
             ItemId::RawMeat => "Carne Crua",
             ItemId::CookedMeat => "Carne Cozida",
             ItemId::Hide => "Couro",
+            ItemId::MetalOre => "Minério de Metal",
+            ItemId::MetalIngot => "Lingote de Metal",
+            ItemId::MetalPickaxe => "Picareta de Metal",
+            ItemId::MetalHatchet => "Machado de Metal",
+            ItemId::MetalSword => "Espada de Metal",
+            ItemId::Forge => "Forja",
             ItemId::StonePickaxe => "Picareta de Pedra",
             ItemId::StoneHatchet => "Machado de Pedra",
             ItemId::WoodenSpear => "Lança de Madeira",
@@ -97,15 +115,25 @@ impl ItemId {
 
     pub fn max_stack(self) -> u32 {
         match self {
-            ItemId::Wood | ItemId::Thatch | ItemId::Stone | ItemId::Flint | ItemId::Berry | ItemId::Hide => 100,
+            ItemId::Wood
+            | ItemId::Thatch
+            | ItemId::Stone
+            | ItemId::Flint
+            | ItemId::Berry
+            | ItemId::Hide
+            | ItemId::MetalOre
+            | ItemId::MetalIngot => 100,
             ItemId::RawMeat | ItemId::CookedMeat => 40,
             ItemId::Narcotic => 50,
             ItemId::RaptorSaddle => 1,
-            ItemId::Campfire | ItemId::Workbench | ItemId::StorageBox => 5,
+            ItemId::Campfire | ItemId::Forge | ItemId::Workbench | ItemId::StorageBox => 5,
             ItemId::WoodFoundation | ItemId::WoodWall | ItemId::WoodDoor => 20,
             ItemId::StonePickaxe
             | ItemId::StoneHatchet
             | ItemId::WoodenSpear
+            | ItemId::MetalPickaxe
+            | ItemId::MetalHatchet
+            | ItemId::MetalSword
             | ItemId::WoodenClub
             | ItemId::Slingshot => 1,
         }
@@ -113,10 +141,18 @@ impl ItemId {
 
     pub fn tool(self) -> Option<ToolKind> {
         match self {
-            ItemId::StonePickaxe => Some(ToolKind::Pickaxe),
-            ItemId::StoneHatchet => Some(ToolKind::Hatchet),
+            ItemId::StonePickaxe | ItemId::MetalPickaxe => Some(ToolKind::Pickaxe),
+            ItemId::StoneHatchet | ItemId::MetalHatchet => Some(ToolKind::Hatchet),
             ItemId::WoodenSpear => Some(ToolKind::Spear),
             _ => None,
+        }
+    }
+
+    /// Tier da ferramenta: metal rende o dobro ao coletar.
+    pub fn tool_tier(item: Option<ItemId>) -> u32 {
+        match item {
+            Some(ItemId::MetalPickaxe | ItemId::MetalHatchet) => 2,
+            _ => 1,
         }
     }
 
@@ -124,6 +160,7 @@ impl ItemId {
     pub fn structure(self) -> Option<StructureKind> {
         match self {
             ItemId::Campfire => Some(StructureKind::Campfire),
+            ItemId::Forge => Some(StructureKind::Forge),
             ItemId::Workbench => Some(StructureKind::Workbench),
             ItemId::StorageBox => Some(StructureKind::StorageBox),
             ItemId::WoodFoundation => Some(StructureKind::WoodFoundation),
@@ -138,6 +175,8 @@ impl ItemId {
         match self {
             ItemId::StonePickaxe | ItemId::StoneHatchet => Some(100),
             ItemId::WoodenSpear => Some(50),
+            ItemId::MetalPickaxe | ItemId::MetalHatchet => Some(300),
+            ItemId::MetalSword => Some(200),
             ItemId::WoodenClub => Some(60),
             ItemId::Slingshot => Some(80),
             _ => None,
@@ -158,7 +197,10 @@ impl ItemId {
     /// Dano corpo a corpo ao golpear uma criatura com este item na mão.
     pub fn melee_damage(item: Option<ItemId>) -> f32 {
         match item {
+            Some(ItemId::MetalSword) => 32.0,
             Some(ItemId::WoodenSpear) => 22.0,
+            Some(ItemId::MetalHatchet) => 18.0,
+            Some(ItemId::MetalPickaxe) => 15.0,
             Some(ItemId::StoneHatchet) => 12.0,
             Some(ItemId::StonePickaxe) => 10.0,
             Some(ItemId::WoodenClub) => 3.0,
@@ -179,6 +221,7 @@ impl ItemId {
     pub fn reach_bonus(item: Option<ItemId>) -> f32 {
         match item {
             Some(ItemId::WoodenSpear) => 14.0,
+            Some(ItemId::MetalSword) => 6.0,
             _ => 0.0,
         }
     }
@@ -198,12 +241,15 @@ mod tests {
     }
 
     #[test]
-    fn spear_is_the_best_weapon() {
+    fn sword_is_the_best_weapon_and_spear_the_best_primitive() {
+        let sword = ItemId::melee_damage(Some(ItemId::MetalSword));
         let spear = ItemId::melee_damage(Some(ItemId::WoodenSpear));
         for item in ItemId::ALL {
-            assert!(ItemId::melee_damage(Some(item)) <= spear);
+            assert!(ItemId::melee_damage(Some(item)) <= sword);
         }
-        assert!(ItemId::melee_damage(None) < spear);
+        for item in [ItemId::StonePickaxe, ItemId::StoneHatchet, ItemId::WoodenClub] {
+            assert!(ItemId::melee_damage(Some(item)) < spear);
+        }
     }
 
     #[test]

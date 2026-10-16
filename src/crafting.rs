@@ -15,6 +15,10 @@ pub struct Recipe {
     pub secs: f32,
     /// Estação que precisa estar por perto (ex.: bancada).
     pub station: Option<StructureKind>,
+    /// Nível do jogador para aprender o engrama.
+    pub level: u32,
+    /// Pontos de engrama para aprender (0 = já vem aprendida).
+    pub engram_cost: u32,
 }
 
 const BENCH: Option<StructureKind> = Some(StructureKind::Workbench);
@@ -26,6 +30,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 1), (ItemId::Stone, 1), (ItemId::Thatch, 10)],
         secs: 2.0,
         station: None,
+        level: 1,
+        engram_cost: 0,
     },
     Recipe {
         output: ItemId::StoneHatchet,
@@ -38,6 +44,8 @@ pub const RECIPES: &[Recipe] = &[
         ],
         secs: 2.0,
         station: None,
+        level: 2,
+        engram_cost: 3,
     },
     Recipe {
         output: ItemId::WoodenSpear,
@@ -45,6 +53,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 8), (ItemId::Thatch, 12)],
         secs: 2.5,
         station: None,
+        level: 2,
+        engram_cost: 3,
     },
     Recipe {
         output: ItemId::WoodenClub,
@@ -52,6 +62,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 8), (ItemId::Thatch, 10)],
         secs: 2.0,
         station: None,
+        level: 3,
+        engram_cost: 4,
     },
     Recipe {
         output: ItemId::Slingshot,
@@ -59,6 +71,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 5), (ItemId::Thatch, 10), (ItemId::Hide, 2)],
         secs: 3.0,
         station: None,
+        level: 5,
+        engram_cost: 6,
     },
     Recipe {
         output: ItemId::Narcotic,
@@ -66,6 +80,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Berry, 6), (ItemId::RawMeat, 1)],
         secs: 3.0,
         station: None,
+        level: 5,
+        engram_cost: 4,
     },
     Recipe {
         output: ItemId::Campfire,
@@ -78,6 +94,8 @@ pub const RECIPES: &[Recipe] = &[
         ],
         secs: 3.0,
         station: None,
+        level: 1,
+        engram_cost: 0,
     },
     Recipe {
         output: ItemId::Workbench,
@@ -85,6 +103,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 20), (ItemId::Stone, 10), (ItemId::Thatch, 10)],
         secs: 5.0,
         station: None,
+        level: 3,
+        engram_cost: 5,
     },
     Recipe {
         output: ItemId::StorageBox,
@@ -92,6 +112,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 25), (ItemId::Thatch, 15)],
         secs: 4.0,
         station: None,
+        level: 4,
+        engram_cost: 4,
     },
     Recipe {
         output: ItemId::WoodFoundation,
@@ -99,6 +121,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 8), (ItemId::Stone, 2)],
         secs: 2.0,
         station: BENCH,
+        level: 4,
+        engram_cost: 3,
     },
     Recipe {
         output: ItemId::WoodWall,
@@ -106,6 +130,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 6), (ItemId::Thatch, 2)],
         secs: 2.0,
         station: BENCH,
+        level: 4,
+        engram_cost: 3,
     },
     Recipe {
         output: ItemId::WoodDoor,
@@ -113,6 +139,8 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Wood, 5), (ItemId::Thatch, 3)],
         secs: 2.0,
         station: BENCH,
+        level: 4,
+        engram_cost: 3,
     },
     Recipe {
         output: ItemId::RaptorSaddle,
@@ -120,6 +148,49 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(ItemId::Hide, 20), (ItemId::Thatch, 20), (ItemId::Wood, 10)],
         secs: 6.0,
         station: BENCH,
+        level: 8,
+        engram_cost: 10,
+    },
+    Recipe {
+        output: ItemId::Forge,
+        count: 1,
+        inputs: &[
+            (ItemId::Stone, 40),
+            (ItemId::Wood, 20),
+            (ItemId::Flint, 10),
+            (ItemId::Hide, 5),
+        ],
+        secs: 8.0,
+        station: BENCH,
+        level: 10,
+        engram_cost: 12,
+    },
+    Recipe {
+        output: ItemId::MetalPickaxe,
+        count: 1,
+        inputs: &[(ItemId::MetalIngot, 2), (ItemId::Wood, 2), (ItemId::Hide, 2)],
+        secs: 4.0,
+        station: BENCH,
+        level: 12,
+        engram_cost: 10,
+    },
+    Recipe {
+        output: ItemId::MetalHatchet,
+        count: 1,
+        inputs: &[(ItemId::MetalIngot, 2), (ItemId::Wood, 2), (ItemId::Hide, 2)],
+        secs: 4.0,
+        station: BENCH,
+        level: 12,
+        engram_cost: 10,
+    },
+    Recipe {
+        output: ItemId::MetalSword,
+        count: 1,
+        inputs: &[(ItemId::MetalIngot, 4), (ItemId::Wood, 2), (ItemId::Hide, 2)],
+        secs: 5.0,
+        station: BENCH,
+        level: 14,
+        engram_cost: 12,
     },
 ];
 

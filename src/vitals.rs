@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::items::FoodEffect;
 
+/// Máximos base (nível 1, sem pontos de atributo).
 pub const MAX_HEALTH: f32 = 100.0;
 pub const MAX_FOOD: f32 = 100.0;
 pub const MAX_WATER: f32 = 100.0;
@@ -27,6 +28,26 @@ const REGEN_THRESHOLD: f32 = 0.3;
 pub const SWING_STAMINA: f32 = 3.0;
 pub const DRINK_WATER: f32 = 20.0;
 
+/// Valores máximos de cada atributo (crescem com pontos de atributo).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Maxima {
+    pub health: f32,
+    pub food: f32,
+    pub water: f32,
+    pub stamina: f32,
+}
+
+impl Default for Maxima {
+    fn default() -> Self {
+        Self {
+            health: MAX_HEALTH,
+            food: MAX_FOOD,
+            water: MAX_WATER,
+            stamina: MAX_STAMINA,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vitals {
     pub health: f32,
@@ -34,17 +55,34 @@ pub struct Vitals {
     pub water: f32,
     pub stamina: f32,
     pub exhausted: bool,
+    /// Saves anteriores à v0.6 não têm máximos: usam os valores base.
+    #[serde(default)]
+    pub max: Maxima,
 }
 
 impl Vitals {
     pub fn full() -> Self {
+        Self::full_with(Maxima::default())
+    }
+
+    pub fn full_with(max: Maxima) -> Self {
         Self {
-            health: MAX_HEALTH,
-            food: MAX_FOOD,
-            water: MAX_WATER,
-            stamina: MAX_STAMINA,
+            health: max.health,
+            food: max.food,
+            water: max.water,
+            stamina: max.stamina,
             exhausted: false,
+            max,
         }
+    }
+
+    /// Troca os máximos (ex.: ponto de atributo). O que aumentou também enche.
+    pub fn set_max(&mut self, max: Maxima) {
+        self.health = (self.health + (max.health - self.max.health).max(0.0)).min(max.health);
+        self.food = (self.food + (max.food - self.max.food).max(0.0)).min(max.food);
+        self.water = (self.water + (max.water - self.max.water).max(0.0)).min(max.water);
+        self.stamina = (self.stamina + (max.stamina - self.max.stamina).max(0.0)).min(max.stamina);
+        self.max = max;
     }
 
     pub fn is_dead(&self) -> bool {
@@ -64,7 +102,7 @@ impl Vitals {
         if sprinting {
             self.drain_stamina(SPRINT_STAMINA_DRAIN * dt);
         } else {
-            self.stamina = (self.stamina + STAMINA_REGEN * dt).min(MAX_STAMINA);
+            self.stamina = (self.stamina + STAMINA_REGEN * dt).min(self.max.stamina);
             if self.stamina >= EXHAUSTED_RECOVERY {
                 self.exhausted = false;
             }
@@ -73,8 +111,8 @@ impl Vitals {
         let starving = [self.food, self.water].iter().filter(|&&v| v <= 0.0).count() as f32;
         if starving > 0.0 {
             self.damage(STARVE_DAMAGE * starving * dt);
-        } else if self.food >= MAX_FOOD * REGEN_THRESHOLD && self.water >= MAX_WATER * REGEN_THRESHOLD {
-            self.health = (self.health + HEALTH_REGEN * dt).min(MAX_HEALTH);
+        } else if self.food >= self.max.food * REGEN_THRESHOLD && self.water >= self.max.water * REGEN_THRESHOLD {
+            self.health = (self.health + HEALTH_REGEN * dt).min(self.max.health);
         }
     }
 
@@ -99,13 +137,13 @@ impl Vitals {
     }
 
     pub fn eat(&mut self, effect: FoodEffect) {
-        self.food = (self.food + effect.food).min(MAX_FOOD);
-        self.water = (self.water + effect.water).min(MAX_WATER);
-        self.health = (self.health + effect.health).min(MAX_HEALTH);
+        self.food = (self.food + effect.food).min(self.max.food);
+        self.water = (self.water + effect.water).min(self.max.water);
+        self.health = (self.health + effect.health).min(self.max.health);
     }
 
     pub fn drink(&mut self, amount: f32) {
-        self.water = (self.water + amount).min(MAX_WATER);
+        self.water = (self.water + amount).min(self.max.water);
     }
 }
 

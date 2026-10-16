@@ -1,6 +1,7 @@
 # Roadmap — Island (sugestão)
 
-Cada marco é jogável por si só. A ordem prioriza o loop central de survival antes de dinossauros, e dinossauros antes de rede.
+Cada marco é jogável por si só. A ordem prioriza o loop central de survival antes de dinossauros, dinossauros antes de rede,
+e rede antes do polimento (arte, áudio e conteúdo novo são feitos já sobre a arquitetura multiplayer).
 
 ## ✅ v0.1 — Fundação
 - Personagem com movimento 8 direções e sprite esquerda/direita
@@ -45,24 +46,35 @@ Cada marco é jogável por si só. A ordem prioriza o loop central de survival a
 - Níveis 1–30 na natureza, escalando vida, torpor e dano
 - Ainda não: domesticados lutando sozinhos, fome/ração de domesticados, XP de criaturas
 
-## v0.6 — Progressão RPG
-- Nível e XP do jogador, pontos de atributo
-- Engramas: desbloqueio de receitas por nível
-- Novos tiers: metal, forja, ferramentas de metal
-- Biomas novos na ilha (selva, montanha, pântano) e cavernas
+## ✅ v0.6 — Progressão RPG
+- XP e nível do jogador (até 30): coleta, crafting, abates e domesticação dão XP
+- Pontos de atributo: vida, stamina, comida, água e dano corpo a corpo
+- Engramas: receitas têm nível mínimo e custo em pontos; clicar na receita com cadeado aprende
+- Bioma de montanha no interior da ilha, com rochas de metal (picareta rende minério)
+- Tier de metal: forja (funde 2 minérios em 1 lingote), picareta, machado (rendem o dobro) e espada de metal
+- Saves antigos mantêm as receitas que já existiam liberadas
+- Movido para a v0.8: biomas de selva e pântano, cavernas
 
-## v0.7 — Conteúdo e polimento
-- Sprites pixel art substituindo as primitivas (spritesheets + animações)
-- Áudio (macroquad já suporta), menus, opções, rebind de teclas
-- Mapa/minimapa, notas exploráveis, chefes simples
-
-## v1.0+ — Multiplayer / MMO
-- Separar simulação de apresentação (servidor autoritativo headless)
-- Rede (ex.: `renet`/`quinn`), sincronização de entidades, interpolação
-- Tribos, chat, PvE/PvP configurável, persistência em banco
+## v0.7 — Multiplayer
+- Separar simulação de apresentação: estado do mundo num servidor autoritativo (headless) e cliente que só desenha e envia input
+- Rede (ex.: `renet`/`quinn`), sincronização de entidades com interpolação e predição do próprio jogador
+- Co-op online para poucos jogadores: entrar/sair, nomes, chat
+- Tribos: dinos domesticados, estruturas e baús pertencem à tribo
+- Save do servidor (mundo + todos os jogadores), PvE com PvP opcional
 - Avaliar migração para ECS (ex.: Bevy) se a contagem de entidades e a rede exigirem
 
+## v0.8 — Conteúdo e polimento
+- Sprites pixel art substituindo as primitivas (spritesheets + animações)
+- Áudio (macroquad já suporta), menus, opções, rebind de teclas
+- Biomas de selva e pântano, cavernas
+- Mapa/minimapa, notas exploráveis, chefes simples
+
+## v1.0+ — MMO
+- Servidores persistentes com banco de dados e muitos jogadores
+- Mundos maiores em chunks, várias ilhas
+- Economia entre jogadores, PvE/PvP por servidor
+
 ## Decisões técnicas a revisitar
-- **Engine:** macroquad é simples e compila rápido; se o projeto crescer muito (ECS, rede, editor), migrar para Bevy entre v0.4 e v1.0. Manter a lógica em módulos puros facilita essa troca.
+- **Engine:** macroquad é simples e compila rápido; se o projeto crescer muito (ECS, rede, editor), migrar para Bevy na v0.7, junto com a separação servidor/cliente. Manter a lógica em módulos puros facilita essa troca.
 - **Mapa:** hoje é uma ilha 160×160 tiles em memória; mundos maiores pedem chunks.
 - **Dados:** itens/receitas em código agora; mover para arquivos (RON) quando houver muitos.

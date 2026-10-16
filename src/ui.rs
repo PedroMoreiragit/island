@@ -3,14 +3,15 @@
 
 use macroquad::prelude::*;
 
-use crate::building::{COOK_SECS, Structure, StructureKind};
+use crate::building::Structure;
 use crate::crafting::{self, CraftQueue, MAX_QUEUE, RECIPES, Recipe};
 use crate::creatures::{Command, Creature};
 use crate::daynight;
 use crate::inventory::{HOTBAR_SIZE, Inventory, Stack};
 use crate::items::ItemId;
+use crate::progression::{self, Attribute, Progression};
 use crate::taming;
-use crate::vitals::{MAX_FOOD, MAX_HEALTH, MAX_STAMINA, MAX_WATER, Vitals};
+use crate::vitals::Vitals;
 
 const SLOT: f32 = 52.0;
 const SMALL_SLOT: f32 = 40.0;
@@ -19,6 +20,10 @@ const PAD: f32 = 16.0;
 const HEADER: f32 = 36.0;
 const COLS: usize = 6;
 const RIGHT_W: f32 = 400.0;
+const CHAR_W: f32 = 230.0;
+/// Topo da lista de atributos dentro do painel de personagem.
+const ATTR_TOP: f32 = 132.0;
+const ATTR_ROW: f32 = 30.0;
 const DETAIL_H: f32 = 92.0;
 
 const PANEL_BG: Color = Color::new(0.10, 0.11, 0.13, 0.92);
@@ -89,7 +94,7 @@ pub enum ContainerView<'a> {
 impl<'a> ContainerView<'a> {
     fn kind(self) -> PanelKind {
         match self {
-            ContainerView::Structure(s) if s.kind == StructureKind::Campfire => PanelKind::Campfire,
+            ContainerView::Structure(s) if s.kind.process().is_some() => PanelKind::Campfire,
             ContainerView::Structure(_) => PanelKind::Storage,
             ContainerView::Creature(c) if c.is_tamed() => PanelKind::Tamed,
             ContainerView::Creature(_) => PanelKind::Taming,
@@ -124,6 +129,8 @@ pub enum UiAction {
     ToggleCommand,
     /// Montar no dino aberto.
     Mount,
+    /// Gastar um ponto de atributo.
+    SpendAttribute(Attribute),
 }
 
 /// Tudo o que o HUD precisa ler do jogo.
@@ -133,6 +140,7 @@ pub struct Hud<'a> {
     pub container: Option<ContainerView<'a>>,
     /// Montaria atual, para a barra de vida dela.
     pub mount: Option<&'a Creature>,
+    pub progression: &'a Progression,
     /// Flash vermelho de dano recebido (s restantes).
     pub hurt: f32,
     pub queue: &'a CraftQueue,
@@ -163,6 +171,9 @@ enum RightLayout {
 }
 
 struct PanelLayout {
+    char_panel: Rect,
+    /// Botões "+" de cada atributo, na ordem de `Attribute::ALL`.
+    attr_buttons: Vec<Rect>,
     inv_panel: Rect,
     slots: Vec<Rect>,
     right_panel: Rect,
@@ -193,9 +204,21 @@ fn panel_layout(n_slots: usize, container: Option<(usize, PanelKind)>, queue_len
             HEADER + PAD * 2.0 + grid_height(RECIPES.len(), COLS, SLOT) + DETAIL_H + 24.0 + 22.0 + SMALL_SLOT + 48.0
         }
     };
-    let total_w = inv_w + 16.0 + RIGHT_W;
-    let x0 = ((screen_width() - total_w) / 2.0).max(8.0);
+    let total_w = CHAR_W + 16.0 + inv_w + 16.0 + RIGHT_W;
+    let cx = ((screen_width() - total_w) / 2.0).max(8.0);
     let y0 = ((screen_height() - inv_h.max(right_h)) / 2.0 - 30.0).max(8.0);
+    let char_panel = Rect::new(cx, y0, CHAR_W, inv_h);
+    let attr_buttons = (0..Attribute::ALL.len())
+        .map(|i| {
+            Rect::new(
+                cx + CHAR_W - PAD - 24.0,
+                y0 + ATTR_TOP + i as f32 * ATTR_ROW - 18.0,
+                24.0,
+                24.0,
+            )
+        })
+        .collect();
+    let x0 = cx + CHAR_W + 16.0;
 
     let mut slots = grid(vec2(x0 + PAD, y0 + HEADER + PAD), n_slots, COLS, SLOT);
     // Primeira linha (hotbar) levemente separada do resto.
@@ -226,6 +249,8 @@ fn panel_layout(n_slots: usize, container: Option<(usize, PanelKind)>, queue_len
     };
 
     PanelLayout {
+        char_panel,
+        attr_buttons,
         inv_panel: Rect::new(x0, y0, inv_w, inv_h),
         slots,
         right_panel: Rect::new(rx, y0, RIGHT_W, right_h),
@@ -325,7 +350,11 @@ pub fn handle_input(
         }
     }
 
-    let over_panel = layout.inv_panel.contains(m) || layout.right_panel.contains(m);
+    if left && let Some(i) = layout.attr_buttons.iter().position(|b| b.contains(m)) {
+        return Some(UiAction::SpendAttribute(Attribute::ALL[i]));
+    }
+
+    let over_panel = layout.inv_panel.contains(m) || layout.right_panel.contains(m) || layout.char_panel.contains(m);
     if left
         && !over_panel
         && let Some(stack) = ui.held.take()
@@ -411,6 +440,7 @@ pub fn draw(hud: &Hud) {
     }
     draw_clock(hud.time);
     draw_vitals(hud.vitals);
+    draw_xp_bar(hud.progression);
     if let Some(mount) = hud.mount {
         draw_mount_bar(mount);
     }
@@ -462,10 +492,10 @@ fn draw_clock(time: f32) {
 
 fn draw_vitals(v: &Vitals) {
     let bars = [
-        ("Vida", v.health / MAX_HEALTH, Color::new(0.85, 0.25, 0.25, 1.0)),
-        ("Comida", v.food / MAX_FOOD, Color::new(0.90, 0.60, 0.20, 1.0)),
-        ("Água", v.water / MAX_WATER, Color::new(0.25, 0.60, 0.95, 1.0)),
-        ("Stamina", v.stamina / MAX_STAMINA, Color::new(0.85, 0.85, 0.30, 1.0)),
+        ("Vida", v.health / v.max.health, Color::new(0.85, 0.25, 0.25, 1.0)),
+        ("Comida", v.food / v.max.food, Color::new(0.90, 0.60, 0.20, 1.0)),
+        ("Água", v.water / v.max.water, Color::new(0.25, 0.60, 0.95, 1.0)),
+        ("Stamina", v.stamina / v.max.stamina, Color::new(0.85, 0.85, 0.30, 1.0)),
     ];
     let (w, h, x) = (170.0, 12.0, 16.0);
     let blink = (get_time() * 6.0).sin() > 0.0;
@@ -533,9 +563,23 @@ fn draw_queue_hud(queue: &CraftQueue) {
 }
 
 /// Vida da montaria, acima das barras do jogador.
+/// Nível e barra de XP, logo acima das barras de status.
+fn draw_xp_bar(p: &Progression) {
+    let (x, w, h) = (16.0, 170.0, 6.0);
+    let y = screen_height() - 30.0 - 4.0 * 24.0 + 4.0;
+    let mut label = format!("Nv {}", p.level);
+    if p.attribute_points > 0 {
+        label.push_str(" +");
+    }
+    shadowed(&label, x, y + 7.0, 18.0, ACCENT);
+    let bx = x + 64.0;
+    draw_rectangle(bx, y, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
+    draw_rectangle(bx, y, w * p.xp_frac(), h, ACCENT);
+}
+
 fn draw_mount_bar(mount: &Creature) {
     let (x, w, h) = (16.0, 234.0, 10.0);
-    let y = screen_height() - 30.0 - 4.0 * 24.0 - 14.0;
+    let y = screen_height() - 30.0 - 5.0 * 24.0 - 14.0;
     let label = format!("{} Nv {}   F: desmontar", mount.species.name(), mount.level);
     shadowed(&label, x, y - 4.0, 18.0, OK);
     draw_rectangle(x, y, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
@@ -589,6 +633,8 @@ fn draw_panels(hud: &Hud) {
         Color::new(0.0, 0.0, 0.0, 0.35),
     );
 
+    draw_character_panel(&layout, hud, m);
+
     let p = layout.inv_panel;
     draw_panel(p, "Inventário");
     draw_text("hotbar", p.right() - 70.0, p.y + 28.0, 18.0, DIM);
@@ -632,11 +678,18 @@ fn draw_panels(hud: &Hud) {
             draw_panel(rp, "Crafting");
             let hovered = recipes.iter().position(|r| r.contains(m));
             for (i, (rect, recipe)) in recipes.iter().zip(RECIPES).enumerate() {
-                let craftable = crafting::can_afford(inv, recipe) && (hud.station_ok)(recipe);
+                let known = hud.progression.knows(recipe.output);
+                let craftable = known && crafting::can_afford(inv, recipe) && (hud.station_ok)(recipe);
                 draw_slot(*rect, None, false);
                 draw_item_icon(recipe.output, *rect);
                 draw_count(*rect, recipe.count);
-                if craftable {
+                if !known {
+                    draw_lock(*rect, recipe.level);
+                    let learnable = hud.progression.can_learn(recipe).is_ok();
+                    if learnable {
+                        draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.5, OK);
+                    }
+                } else if craftable {
                     let thick = if hovered == Some(i) { 3.0 } else { 1.5 };
                     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, thick, ACCENT);
                 } else {
@@ -689,11 +742,14 @@ fn draw_fire_controls(fire: &Structure, slots: &[Rect], button: Rect, m: Vec2) {
 
     draw_button(button, if fire.active { "Apagar" } else { "Acender" }, true, m);
 
-    if fire.is_lit() && fire.cook > 0.0 {
+    if let Some(process) = fire.kind.process()
+        && fire.is_lit()
+        && fire.cook > 0.0
+    {
         let bar = Rect::new(button.right() + 16.0, button.y + 20.0, 200.0, 6.0);
-        draw_text("Cozinhando carne", bar.x, button.y + 12.0, 16.0, TEXT);
+        draw_text(process.label, bar.x, button.y + 12.0, 16.0, TEXT);
         draw_rectangle(bar.x, bar.y, bar.w, bar.h, Color::new(1.0, 1.0, 1.0, 0.15));
-        draw_rectangle(bar.x, bar.y, bar.w * (fire.cook / COOK_SECS).min(1.0), bar.h, OK);
+        draw_rectangle(bar.x, bar.y, bar.w * (fire.cook / process.secs).min(1.0), bar.h, OK);
     }
 }
 
@@ -787,6 +843,62 @@ fn draw_tamed_info(c: &Creature, area: Rect, buttons: &[Rect], m: Vec2) {
     draw_button(buttons[1], "Montar", c.can_ride(), m);
 }
 
+fn draw_character_panel(layout: &PanelLayout, hud: &Hud, m: Vec2) {
+    let (p, prog) = (layout.char_panel, hud.progression);
+    draw_panel(p, "Personagem");
+    let x = p.x + PAD;
+    let w = p.w - PAD * 2.0;
+    draw_text(format!("Nível {}", prog.level), x, p.y + 64.0, 24.0, ACCENT);
+    let xp_label = if prog.level >= progression::MAX_LEVEL {
+        "Nível máximo".to_owned()
+    } else {
+        format!("XP {}/{}", prog.xp, progression::xp_to_next(prog.level))
+    };
+    draw_bar(x, p.y + 84.0, w, &xp_label, prog.xp_frac(), ACCENT);
+    let points_color = if prog.attribute_points > 0 { OK } else { DIM };
+    let points = format!("Pontos de atributo: {}", prog.attribute_points);
+    draw_text(&points, x, p.y + ATTR_TOP - 26.0, 16.0, points_color);
+
+    let max = hud.vitals.max;
+    for (i, attr) in Attribute::ALL.into_iter().enumerate() {
+        let y = p.y + ATTR_TOP + i as f32 * ATTR_ROW;
+        let value = match attr {
+            Attribute::Health => format!("{:.0}", max.health),
+            Attribute::Stamina => format!("{:.0}", max.stamina),
+            Attribute::Food => format!("{:.0}", max.food),
+            Attribute::Water => format!("{:.0}", max.water),
+            Attribute::Melee => format!("{:.0}%", prog.melee_mult() * 100.0),
+        };
+        let spent = prog.attributes.get(attr);
+        let name = if spent > 0 {
+            format!("{} (+{spent})", attr.name())
+        } else {
+            attr.name().to_owned()
+        };
+        draw_text(&name, x, y, 18.0, TEXT);
+        let vw = measure_text(&value, None, 18, 1.0).width;
+        draw_text(&value, p.right() - PAD - 32.0 - vw, y, 18.0, TEXT);
+        draw_button(layout.attr_buttons[i], "+", prog.attribute_points > 0, m);
+    }
+
+    let engrams = format!("Pontos de engrama: {}", prog.engram_points);
+    let ey = p.y + ATTR_TOP + Attribute::ALL.len() as f32 * ATTR_ROW + 8.0;
+    draw_text(&engrams, x, ey, 16.0, if prog.engram_points > 0 { OK } else { DIM });
+    draw_text("Receita com cadeado:", x, ey + 22.0, 16.0, DIM);
+    draw_text("clique para aprender.", x, ey + 40.0, 16.0, DIM);
+}
+
+/// Cadeado pequeno no canto de uma receita bloqueada.
+fn draw_lock(rect: Rect, level: u32) {
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, Color::new(0.0, 0.0, 0.0, 0.6));
+    let (lx, ly) = (rect.x + 6.0, rect.y + 8.0);
+    draw_circle_lines(lx + 5.0, ly + 3.0, 4.0, 1.5, DIM);
+    draw_rectangle(lx, ly + 3.0, 10.0, 8.0, DIM);
+    let label = format!("Nv {level}");
+    let w = measure_text(&label, None, 16, 1.0).width;
+    draw_text(&label, rect.right() - w - 3.0, rect.bottom() - 4.0, 16.0, TEXT);
+}
+
 fn stack_tooltip(stack: &Stack) -> String {
     match stack.item.max_durability() {
         Some(max) => format!("{} ({}/{max})", stack.item.name(), stack.durability),
@@ -801,6 +913,34 @@ fn draw_recipe_detail(area: Rect, recipe: Option<&Recipe>, hud: &Hud) {
         return;
     };
     draw_text(recipe.output.name(), area.x + 10.0, area.y + 24.0, 22.0, TEXT);
+    let prog = hud.progression;
+    if !prog.knows(recipe.output) {
+        let level_ok = prog.level >= recipe.level;
+        let points_ok = prog.engram_points >= recipe.engram_cost;
+        let level = format!("Requer nível {} (você: {})", recipe.level, prog.level);
+        draw_text(
+            &level,
+            area.x + 10.0,
+            area.y + 48.0,
+            18.0,
+            if level_ok { OK } else { BAD },
+        );
+        let cost = format!(
+            "Custa {} pontos de engrama (você: {})",
+            recipe.engram_cost, prog.engram_points
+        );
+        draw_text(
+            &cost,
+            area.x + 10.0,
+            area.y + 68.0,
+            18.0,
+            if points_ok { OK } else { BAD },
+        );
+        if level_ok && points_ok {
+            draw_text("Clique para aprender", area.x + 10.0, area.y + 86.0, 16.0, ACCENT);
+        }
+        return;
+    }
     let secs = format!("{:.0}s", recipe.secs.ceil());
     let w = measure_text(&secs, None, 18, 1.0).width;
     draw_text(&secs, area.right() - w - 10.0, area.y + 24.0, 18.0, DIM);
@@ -956,6 +1096,56 @@ pub fn draw_item_icon(item: ItemId, rect: Rect) {
                 draw_circle(q.x, q.y, 4.0 * u, col);
             }
             draw_ellipse(c.x, c.y, 7.0 * u, 5.0 * u, 0.3, Color::from_rgba(130, 94, 60, 255));
+        }
+        ItemId::MetalOre => {
+            let a = p(0.0, 2.0);
+            draw_ellipse(a.x, a.y, 15.0 * u, 11.0 * u, 0.0, stone_dark);
+            for (dx, dy) in [(-6.0, -1.0), (4.0, 3.0), (1.0, -5.0)] {
+                let q = p(dx, dy);
+                draw_circle(q.x, q.y, 2.6 * u, Color::from_rgba(196, 120, 70, 255));
+            }
+            let q = p(-2.0, 4.0);
+            draw_circle(q.x, q.y, 1.6 * u, Color::from_rgba(230, 230, 240, 255));
+        }
+        ItemId::MetalIngot => {
+            let metal = Color::from_rgba(170, 176, 186, 255);
+            draw_triangle(p(-16.0, 8.0), p(16.0, 8.0), p(11.0, -4.0), metal);
+            draw_triangle(p(-16.0, 8.0), p(11.0, -4.0), p(-11.0, -4.0), metal);
+            rect_at(-11.0, -6.0, 22.0, 3.0, Color::from_rgba(215, 220, 228, 255));
+        }
+        ItemId::MetalPickaxe | ItemId::MetalHatchet | ItemId::MetalSword => {
+            let metal = Color::from_rgba(196, 202, 212, 255);
+            let shine = Color::from_rgba(235, 240, 248, 255);
+            match item {
+                ItemId::MetalPickaxe => {
+                    line(p(-12.0, 14.0), p(8.0, -10.0), 4.0, wood_dark);
+                    line(p(-6.0, -17.0), p(18.0, 1.0), 5.0, metal);
+                    line(p(-2.0, -15.0), p(8.0, -8.0), 1.5, shine);
+                }
+                ItemId::MetalHatchet => {
+                    line(p(-12.0, 14.0), p(8.0, -10.0), 4.0, wood_dark);
+                    draw_triangle(p(4.0, -16.0), p(16.0, -4.0), p(2.0, -4.0), metal);
+                    line(p(6.0, -13.0), p(13.0, -6.0), 1.5, shine);
+                }
+                _ => {
+                    line(p(-14.0, 14.0), p(-8.0, 8.0), 4.0, wood_dark);
+                    line(p(-14.0, 6.0), p(-6.0, 14.0), 3.0, Color::from_rgba(150, 120, 60, 255));
+                    line(p(-8.0, 8.0), p(14.0, -14.0), 5.0, metal);
+                    line(p(-4.0, 3.0), p(12.0, -13.0), 1.5, shine);
+                }
+            }
+        }
+        ItemId::Forge => {
+            let brick = Color::from_rgba(120, 112, 108, 255);
+            rect_at(-15.0, -12.0, 30.0, 26.0, brick);
+            rect_at(-15.0, -16.0, 30.0, 5.0, Color::from_rgba(150, 142, 136, 255));
+            rect_at(-7.0, 0.0, 14.0, 10.0, Color::from_rgba(40, 30, 28, 255));
+            draw_triangle(
+                p(-5.0, 10.0),
+                p(5.0, 10.0),
+                p(0.0, 2.0),
+                Color::from_rgba(250, 140, 40, 255),
+            );
         }
         ItemId::StonePickaxe => {
             line(p(-12.0, 14.0), p(8.0, -10.0), 4.0, wood);

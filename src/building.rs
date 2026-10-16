@@ -10,9 +10,23 @@ use crate::world::TILE;
 
 pub const STORAGE_SLOTS: usize = 18;
 pub const CAMPFIRE_SLOTS: usize = 6;
+pub const FORGE_SLOTS: usize = 6;
 /// Segundos para a fogueira cozinhar uma carne.
 pub const COOK_SECS: f32 = 10.0;
+/// Segundos para a forja fundir minério em lingote.
+pub const SMELT_SECS: f32 = 8.0;
 pub const CAMPFIRE_LIGHT: f32 = 150.0;
+pub const FORGE_LIGHT: f32 = 100.0;
+
+/// O que uma estrutura de fogo transforma enquanto acesa.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Process {
+    pub input: ItemId,
+    pub amount: u32,
+    pub output: ItemId,
+    pub secs: f32,
+    pub label: &'static str,
+}
 /// Distância máxima (jogador → centro do tile) para posicionar.
 pub const PLACE_REACH: f32 = TILE * 3.5;
 /// Distância máxima até uma estação (ex.: bancada) para usar receitas que dependem dela.
@@ -23,6 +37,7 @@ pub const INTERACT_REACH: f32 = 20.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StructureKind {
     Campfire,
+    Forge,
     Workbench,
     StorageBox,
     WoodFoundation,
@@ -59,6 +74,7 @@ impl StructureKind {
     pub fn item(self) -> ItemId {
         match self {
             StructureKind::Campfire => ItemId::Campfire,
+            StructureKind::Forge => ItemId::Forge,
             StructureKind::Workbench => ItemId::Workbench,
             StructureKind::StorageBox => ItemId::StorageBox,
             StructureKind::WoodFoundation => ItemId::WoodFoundation,
@@ -74,10 +90,35 @@ impl StructureKind {
         }
     }
 
+    /// Estruturas de fogo (queimam combustível e transformam itens).
+    pub fn process(self) -> Option<Process> {
+        match self {
+            StructureKind::Campfire => Some(Process {
+                input: ItemId::RawMeat,
+                amount: 1,
+                output: ItemId::CookedMeat,
+                secs: COOK_SECS,
+                label: "Cozinhando carne",
+            }),
+            StructureKind::Forge => Some(Process {
+                input: ItemId::MetalOre,
+                amount: 2,
+                output: ItemId::MetalIngot,
+                secs: SMELT_SECS,
+                label: "Fundindo metal",
+            }),
+            _ => None,
+        }
+    }
+
     pub fn interactive(self) -> bool {
         matches!(
             self,
-            StructureKind::Campfire | StructureKind::Workbench | StructureKind::StorageBox | StructureKind::WoodDoor
+            StructureKind::Campfire
+                | StructureKind::Forge
+                | StructureKind::Workbench
+                | StructureKind::StorageBox
+                | StructureKind::WoodDoor
         )
     }
 }
@@ -140,7 +181,14 @@ impl Structure {
     }
 
     pub fn is_lit(&self) -> bool {
-        self.kind == StructureKind::Campfire && self.active && self.fuel > 0.0
+        self.kind.process().is_some() && self.active && self.fuel > 0.0
+    }
+
+    pub fn light_radius(&self) -> f32 {
+        match self.kind {
+            StructureKind::Forge => FORGE_LIGHT,
+            _ => CAMPFIRE_LIGHT,
+        }
     }
 
     /// Y usada no y-sort: a base da estrutura.
@@ -186,9 +234,10 @@ impl Structure {
         true
     }
 
-    /// Avança a fogueira: queima combustível e cozinha carne.
+    /// Avança fogueira/forja: queima combustível e transforma itens (carne, minério).
     pub fn tick(&mut self, dt: f32) {
-        if self.kind != StructureKind::Campfire || !self.active {
+        let Some(process) = self.kind.process() else { return };
+        if !self.active {
             return;
         }
         self.fuel -= dt;
@@ -200,19 +249,19 @@ impl Structure {
             }
         }
         let Some(storage) = self.storage.as_mut() else { return };
-        if storage.count(ItemId::RawMeat) == 0 {
+        if storage.count(process.input) < process.amount {
             self.cook = 0.0;
             return;
         }
         self.cook += dt;
-        if self.cook < COOK_SECS {
+        if self.cook < process.secs {
             return;
         }
         self.cook = 0.0;
-        storage.remove(ItemId::RawMeat, 1);
-        if storage.insert_stack(Stack::new(ItemId::CookedMeat, 1)).is_some() {
-            // Sem espaço para a carne cozida: devolve a crua e espera.
-            storage.add(ItemId::RawMeat, 1);
+        storage.remove(process.input, process.amount);
+        if storage.insert_stack(Stack::new(process.output, 1)).is_some() {
+            // Sem espaço para o resultado: devolve a matéria-prima e espera.
+            storage.add(process.input, process.amount);
         }
     }
 }
@@ -221,6 +270,7 @@ fn storage_slots(kind: StructureKind) -> Option<usize> {
     match kind {
         StructureKind::StorageBox => Some(STORAGE_SLOTS),
         StructureKind::Campfire => Some(CAMPFIRE_SLOTS),
+        StructureKind::Forge => Some(FORGE_SLOTS),
         _ => None,
     }
 }
@@ -295,6 +345,22 @@ mod tests {
         let storage = fire.storage.as_ref().unwrap();
         assert_eq!(storage.count(ItemId::CookedMeat), 2);
         assert_eq!(storage.count(ItemId::RawMeat), 0);
+    }
+
+    #[test]
+    fn forge_smelts_two_ore_into_an_ingot() {
+        let mut forge = Structure::new(StructureKind::Forge, (0, 0));
+        let storage = forge.storage.as_mut().unwrap();
+        storage.add(ItemId::Wood, 3);
+        storage.add(ItemId::MetalOre, 5);
+        assert!(forge.toggle_fire());
+        for _ in 0..(SMELT_SECS as usize * 2 + 1) {
+            forge.tick(1.0);
+        }
+        let storage = forge.storage.as_ref().unwrap();
+        assert_eq!(storage.count(ItemId::MetalIngot), 2);
+        assert_eq!(storage.count(ItemId::MetalOre), 1, "1 minério sozinho não funde");
+        assert_eq!(forge.light_radius(), FORGE_LIGHT);
     }
 
     #[test]
