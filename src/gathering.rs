@@ -16,6 +16,9 @@ pub fn roll_yield(kind: NodeKind, tool: Option<ToolKind>, rng: &mut Rng) -> Vec<
     let tool = tool.filter(|t| *t != ToolKind::Spear);
     match (kind, tool) {
         (NodeKind::Pebble, _) => push(ItemId::Stone, 1),
+        // Colher frutinhas é trabalho para as mãos.
+        (NodeKind::Bush, None) => push(ItemId::Berry, rng.range_u32(2, 3)),
+        (NodeKind::Bush, Some(_)) => push(ItemId::Berry, 1),
         (NodeKind::Tree, None) => {
             push(ItemId::Wood, 1);
             push(ItemId::Thatch, rng.range_u32(1, 2));

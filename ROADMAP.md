@@ -2,7 +2,7 @@
 
 Cada marco é jogável por si só. A ordem prioriza o loop central de survival antes de dinossauros, e dinossauros antes de rede.
 
-## ✅ v0.1 — Fundação (atual)
+## ✅ v0.1 — Fundação
 - Personagem com movimento 8 direções e sprite esquerda/direita
 - Ilha procedural com praia, água rasa e funda
 - Coleta: árvores (madeira/palha), rochas (pedra/sílex), pedrinhas no chão
@@ -10,13 +10,13 @@ Cada marco é jogável por si só. A ordem prioriza o loop central de survival a
 - Crafting: picareta, machado, lança, fogueira
 - Ferramentas alteram o rendimento (estilo ARK)
 
-## v0.2 — Sobrevivência básica
-- Atributos: vida, fome, sede, stamina (correr com Shift)
-- Comida (frutinhas em arbustos), água (beber na água rasa)
-- Morte e respawn na praia, com bolsa dos itens no local da morte
-- Durabilidade de ferramentas
-- Dropar itens no chão / pegar de volta
-- **Save/load** do mundo e do jogador (serde + RON/JSON)
+## ✅ v0.2 — Sobrevivência básica
+- Atributos: vida, comida, água, stamina (correr com Shift, exaustão)
+- Arbustos de frutinhas (comer com R / botão direito), beber água com E na beira
+- Morte e respawn na praia, com bolsa dos itens (e feixe de luz) no local da morte
+- Durabilidade de ferramentas (barra no slot, quebram ao zerar)
+- Largar itens (Q / Ctrl+Q / soltar fora do inventário) e pegar de volta (F)
+- Save/load em JSON (F5, autosave a cada 60 s, ao fechar a janela)
 
 ## v0.3 — Construção
 - Colocar estruturas em grid: fogueira (luz, cozinhar carne), fundação, paredes, porta de madeira/palha

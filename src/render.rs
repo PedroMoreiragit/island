@@ -6,7 +6,8 @@ use macroquad::prelude::*;
 use crate::items::ItemId;
 use crate::player::{Player, SWING_TIME};
 use crate::rng::hash2;
-use crate::world::{NodeKind, ResourceNode, TILE, Tile, World};
+use crate::ui::draw_item_icon;
+use crate::world::{BagKind, GroundBag, NodeKind, ResourceNode, TILE, Tile, World};
 
 pub const DEEP_WATER: Color = Color::new(0.09, 0.31, 0.55, 1.0);
 const SHALLOW_WATER: Color = Color::new(0.20, 0.55, 0.74, 1.0);
@@ -79,11 +80,20 @@ fn draw_foam(world: &World, x: i32, y: i32, px: f32, py: f32, time: f32) {
 
 enum Drawable<'a> {
     Node(&'a ResourceNode),
-    Player,
+    Bag(&'a GroundBag),
+    Player(&'a Player),
 }
 
 /// Desenha nós e jogador ordenados por Y (quem está mais "embaixo" fica na frente).
-pub fn draw_entities(world: &World, player: &Player, held: Option<ItemId>, target: Option<usize>, view: Rect) {
+pub fn draw_entities(
+    world: &World,
+    // `None` enquanto o jogador está morto.
+    player: Option<&Player>,
+    held: Option<ItemId>,
+    target: Option<usize>,
+    view: Rect,
+    time: f32,
+) {
     if let Some(node) = target.map(|i| &world.nodes[i]) {
         let r = node.kind.collision_radius().max(8.0) + 6.0;
         draw_ellipse_lines(
@@ -97,6 +107,7 @@ pub fn draw_entities(world: &World, player: &Player, held: Option<ItemId>, targe
         );
     }
 
+    let player_pos = player.map_or(vec2(f32::MIN, f32::MIN), |p| p.pos);
     let margin = view.w.max(view.h) * 0.1 + 64.0;
     let culled = Rect::new(
         view.x - margin,
@@ -110,13 +121,23 @@ pub fn draw_entities(world: &World, player: &Player, held: Option<ItemId>, targe
         .filter(|n| culled.contains(n.pos))
         .map(|n| (n.pos.y, Drawable::Node(n)))
         .collect();
-    list.push((player.pos.y, Drawable::Player));
+    list.extend(
+        world
+            .bags
+            .iter()
+            .filter(|b| culled.contains(b.pos))
+            .map(|b| (b.pos.y, Drawable::Bag(b))),
+    );
+    if let Some(p) = player {
+        list.push((p.pos.y, Drawable::Player(p)));
+    }
     list.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     for (_, d) in list {
         match d {
-            Drawable::Node(n) => draw_node(n, player.pos),
-            Drawable::Player => draw_player(player, held),
+            Drawable::Node(n) => draw_node(n, player_pos),
+            Drawable::Bag(b) => draw_bag(b, time),
+            Drawable::Player(p) => draw_player(p, held),
         }
     }
 }
@@ -143,6 +164,7 @@ fn draw_node(node: &ResourceNode, player_pos: Vec2) {
         }
         (NodeKind::Rock, true) => draw_rock(pos, node.variant),
         (NodeKind::Pebble, true) => draw_pebbles(pos, node.variant),
+        (NodeKind::Bush, alive) => draw_bush(pos, node.variant, alive),
         _ => {}
     }
 }
@@ -174,6 +196,71 @@ fn draw_tree(pos: Vec2, variant: u8, alpha: f32) {
             draw_triangle(vec2(x - w, base), vec2(x + w, base), vec2(x, base - 24.0), c);
         }
     }
+}
+
+fn draw_bush(pos: Vec2, variant: u8, berries: bool) {
+    let (x, y) = (pos.x, pos.y);
+    let dark = Color::from_rgba(44, 100, 48, 255);
+    let mid = Color::from_rgba(60, 124, 58, 255);
+    draw_ellipse(x, y, 14.0, 5.0, 0.0, SHADOW);
+    draw_circle(x - 7.0, y - 7.0, 8.0, dark);
+    draw_circle(x + 7.0, y - 7.0, 8.0, dark);
+    draw_circle(x, y - 12.0, 9.0, mid);
+    if berries {
+        let red = Color::from_rgba(200, 40, 70, 255);
+        let spots: [(f32, f32); 5] = [(-8.0, -8.0), (6.0, -5.0), (1.0, -15.0), (-3.0, -4.0), (9.0, -11.0)];
+        for (i, &(dx, dy)) in spots.iter().enumerate() {
+            if (i + variant as usize) % 5 != 4 {
+                draw_circle(x + dx, y + dy, 2.2, red);
+            }
+        }
+    }
+}
+
+fn draw_bag(bag: &GroundBag, time: f32) {
+    let (x, y) = (bag.pos.x, bag.pos.y);
+    match bag.kind {
+        BagKind::Death => {
+            // Feixe de luz para achar a bolsa de longe, como no ARK.
+            let pulse = 0.18 + (time * 2.5).sin() * 0.06;
+            draw_rectangle(x - 3.0, y - 120.0, 6.0, 120.0, Color::new(0.75, 0.55, 1.0, pulse));
+            draw_ellipse(x, y, 10.0, 4.0, 0.0, SHADOW);
+            draw_circle(x, y - 7.0, 8.0, Color::from_rgba(110, 70, 140, 255));
+            draw_rectangle(x - 3.0, y - 17.0, 6.0, 4.0, Color::from_rgba(80, 50, 100, 255));
+        }
+        BagKind::Dropped => {
+            draw_ellipse(x, y, 8.0, 3.0, 0.0, SHADOW);
+            let bob = (time * 3.0 + x).sin() * 1.0;
+            match bag.stacks.as_slice() {
+                [only] => draw_item_icon(only.item, Rect::new(x - 8.0, y - 18.0 + bob, 16.0, 16.0)),
+                _ => {
+                    draw_circle(x, y - 6.0 + bob, 6.0, Color::from_rgba(150, 110, 70, 255));
+                    draw_rectangle(x - 2.0, y - 14.0 + bob, 4.0, 3.0, Color::from_rgba(110, 80, 50, 255));
+                }
+            }
+        }
+    }
+}
+
+/// "[F] Pegar" acima da bolsa mais próxima (espaço de tela).
+pub fn draw_bag_prompt(bag: &GroundBag, camera: &Camera2D) {
+    let label = match (bag.kind, bag.stacks.as_slice()) {
+        (BagKind::Death, _) => "[F] Pegar seus itens".to_owned(),
+        (_, [only]) if only.count > 1 => format!("[F] Pegar {} {}", only.count, only.item.name()),
+        (_, [only]) => format!("[F] Pegar {}", only.item.name()),
+        (_, stacks) => format!("[F] Pegar bolsa ({} pilhas)", stacks.len()),
+    };
+    let at = camera.world_to_screen(bag.pos - vec2(0.0, 26.0));
+    let size = 20.0;
+    let w = measure_text(&label, None, size as u16, 1.0).width;
+    draw_rectangle(
+        at.x - w / 2.0 - 6.0,
+        at.y - 18.0,
+        w + 12.0,
+        24.0,
+        Color::new(0.0, 0.0, 0.0, 0.6),
+    );
+    draw_text(&label, at.x - w / 2.0, at.y, size, WHITE);
 }
 
 fn draw_rock(pos: Vec2, variant: u8) {

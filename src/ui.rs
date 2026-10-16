@@ -6,6 +6,7 @@ use macroquad::prelude::*;
 use crate::crafting::{self, RECIPES};
 use crate::inventory::{HOTBAR_SIZE, Inventory, Stack};
 use crate::items::ItemId;
+use crate::vitals::{MAX_FOOD, MAX_HEALTH, MAX_STAMINA, MAX_WATER, Vitals};
 
 const SLOT: f32 = 52.0;
 const GAP: f32 = 6.0;
@@ -34,6 +35,18 @@ pub struct UiState {
 pub enum UiAction {
     Craft(usize),
     SelectHotbar(usize),
+    /// Pilha solta fora dos painéis: vai para o chão.
+    Drop(Stack),
+}
+
+/// Tudo o que o HUD precisa ler do jogo.
+pub struct Hud<'a> {
+    pub ui: &'a UiState,
+    pub inventory: &'a Inventory,
+    pub selected: usize,
+    pub messages: &'a [(String, f32)],
+    pub vitals: &'a Vitals,
+    pub dead: bool,
 }
 
 struct PanelLayout {
@@ -49,7 +62,7 @@ fn panel_layout(n_slots: usize) -> PanelLayout {
     let grid_h = rows as f32 * (SLOT + GAP) - GAP;
     let inv_w = grid_w + PAD * 2.0;
     let inv_h = grid_h + PAD * 2.0 + HEADER;
-    let craft_h = (HEADER + PAD * 2.0 + 24.0 + RECIPES.len() as f32 * (ROW_H + GAP)).max(inv_h);
+    let craft_h = (HEADER + PAD * 2.0 + 44.0 + RECIPES.len() as f32 * (ROW_H + GAP)).max(inv_h);
     let total_w = inv_w + 16.0 + CRAFT_W;
     let x0 = ((screen_width() - total_w) / 2.0).max(8.0);
     let y0 = ((screen_height() - craft_h) / 2.0 - 40.0).max(8.0);
@@ -140,6 +153,14 @@ pub fn handle_input(ui: &mut UiState, inv: &mut Inventory) -> Option<UiAction> {
         return None;
     }
 
+    let over_panel = layout.inv_panel.contains(m) || layout.craft_panel.contains(m);
+    if left
+        && !over_panel
+        && let Some(stack) = ui.held.take()
+    {
+        return Some(UiAction::Drop(stack));
+    }
+
     if left && ui.held.is_none() {
         let clicked = layout.craft_rows.iter().position(|r| r.contains(m));
         if let Some(i) = clicked.filter(|&i| crafting::can_afford(inv, &RECIPES[i])) {
@@ -154,7 +175,7 @@ fn click_slot(ui: &mut UiState, slot: &mut Option<Stack>) {
     match (ui.held.take(), slot.take()) {
         (None, s) => ui.held = s,
         (Some(h), None) => *slot = Some(h),
-        (Some(mut h), Some(mut s)) if h.item == s.item => {
+        (Some(mut h), Some(mut s)) if h.item == s.item && s.count < s.item.max_stack() => {
             let moved = (s.item.max_stack() - s.count).min(h.count);
             s.count += moved;
             h.count -= moved;
@@ -174,13 +195,10 @@ fn split_slot(ui: &mut UiState, slot: &mut Option<Stack>) {
         (None, Some(s)) if s.count > 1 => {
             let half = s.count / 2;
             s.count -= half;
-            ui.held = Some(Stack {
-                item: s.item,
-                count: half,
-            });
+            ui.held = Some(Stack { count: half, ..*s });
         }
         (Some(h), None) => {
-            *slot = Some(Stack { item: h.item, count: 1 });
+            *slot = Some(Stack { count: 1, ..*h });
             h.count -= 1;
         }
         (Some(h), Some(s)) if h.item == s.item && s.count < s.item.max_stack() => {
@@ -196,26 +214,73 @@ fn split_slot(ui: &mut UiState, slot: &mut Option<Stack>) {
 
 // ---------- Desenho ----------
 
-pub fn draw(ui: &UiState, inv: &Inventory, selected: usize, messages: &[(String, f32)]) {
+pub fn draw(hud: &Hud) {
+    if hud.dead {
+        draw_death_screen();
+        draw_messages(hud.messages);
+        return;
+    }
     draw_help();
-    draw_messages(messages);
-    if ui.inventory_open {
-        draw_panels(ui, inv);
+    draw_vitals(hud.vitals);
+    draw_messages(hud.messages);
+    if hud.ui.inventory_open {
+        draw_panels(hud.ui, hud.inventory);
     } else {
-        draw_hotbar(inv, selected);
+        draw_hotbar(hud.inventory, hud.selected);
     }
 }
 
 fn draw_help() {
     let lines = [
-        "WASD: mover   E / Clique: coletar",
-        "1-6 / Roda: hotbar   Tab / I: inventário",
+        "WASD: mover   Shift: correr   E / Clique: coletar ou beber (na água)",
+        "R / Botão dir.: comer   Q: largar (Ctrl+Q: pilha)   F: pegar",
+        "1-6 / Roda: hotbar   Tab / I: inventário   F5: salvar",
     ];
     for (i, line) in lines.iter().enumerate() {
-        let y = 24.0 + i as f32 * 20.0;
+        let y = 22.0 + i as f32 * 20.0;
         draw_text(line, 13.0, y + 1.0, 20.0, Color::new(0.0, 0.0, 0.0, 0.5));
         draw_text(line, 12.0, y, 20.0, TEXT);
     }
+}
+
+fn draw_vitals(v: &Vitals) {
+    let bars = [
+        ("Vida", v.health / MAX_HEALTH, Color::new(0.85, 0.25, 0.25, 1.0)),
+        ("Comida", v.food / MAX_FOOD, Color::new(0.90, 0.60, 0.20, 1.0)),
+        ("Água", v.water / MAX_WATER, Color::new(0.25, 0.60, 0.95, 1.0)),
+        ("Stamina", v.stamina / MAX_STAMINA, Color::new(0.85, 0.85, 0.30, 1.0)),
+    ];
+    let (w, h, x) = (170.0, 12.0, 16.0);
+    let blink = (get_time() * 6.0).sin() > 0.0;
+    for (i, (label, frac, color)) in bars.into_iter().enumerate() {
+        let y = screen_height() - 30.0 - (bars.len() - 1 - i) as f32 * 24.0;
+        let low = frac < 0.2;
+        let label_color = if low && blink { BAD } else { TEXT };
+        draw_text(label, x, y + 11.0, 18.0, label_color);
+        let bx = x + 64.0;
+        draw_rectangle(bx, y, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
+        let fill = if label == "Stamina" && v.exhausted { DIM } else { color };
+        draw_rectangle(bx, y, w * frac.clamp(0.0, 1.0), h, fill);
+        draw_rectangle_lines(bx, y, w, h, 1.0, BORDER);
+    }
+}
+
+fn draw_death_screen() {
+    draw_rectangle(
+        0.0,
+        0.0,
+        screen_width(),
+        screen_height(),
+        Color::new(0.25, 0.0, 0.0, 0.6),
+    );
+    let center = |text: &str, y: f32, size: f32, color: Color| {
+        let w = measure_text(text, None, size as u16, 1.0).width;
+        draw_text(text, (screen_width() - w) / 2.0, y, size, color);
+    };
+    let cy = screen_height() / 2.0;
+    center("Você morreu", cy - 20.0, 64.0, Color::new(1.0, 0.85, 0.8, 1.0));
+    center("Seus itens ficaram numa bolsa onde você caiu.", cy + 24.0, 24.0, TEXT);
+    center("Pressione Enter ou clique para renascer na praia", cy + 60.0, 22.0, DIM);
 }
 
 fn draw_messages(messages: &[(String, f32)]) {
@@ -326,8 +391,20 @@ fn draw_panels(ui: &UiState, inv: &Inventory) {
             tooltip = Some(names.join(", "));
         }
     }
-    let hint = "Clique numa receita para fabricar";
-    draw_text(hint, c.x + PAD, c.bottom() - 12.0, 18.0, DIM);
+    draw_text(
+        "Clique numa receita para fabricar.",
+        c.x + PAD,
+        c.bottom() - 32.0,
+        18.0,
+        DIM,
+    );
+    draw_text(
+        "Solte um item fora dos painéis para largar.",
+        c.x + PAD,
+        c.bottom() - 12.0,
+        18.0,
+        DIM,
+    );
 
     // Tooltip e pilha no cursor
     if let Some(held) = ui.held {
@@ -340,7 +417,11 @@ fn draw_panels(ui: &UiState, inv: &Inventory) {
         .position(|r| r.contains(m))
         .and_then(|i| inv.slots[i])
     {
-        draw_tooltip(stack.item.name(), m);
+        let text = match stack.item.max_durability() {
+            Some(max) => format!("{} ({}/{max})", stack.item.name(), stack.durability),
+            None => stack.item.name().to_owned(),
+        };
+        draw_tooltip(&text, m);
     } else if let Some(text) = tooltip {
         draw_tooltip(&text, m);
     }
@@ -360,6 +441,13 @@ fn draw_slot(rect: Rect, stack: Option<Stack>, selected: bool) {
     if let Some(s) = stack {
         draw_item_icon(s.item, rect);
         draw_count(rect, s.count);
+        if let Some(frac) = s.durability_frac() {
+            let (bw, bh) = (rect.w - 8.0, 4.0);
+            let (bx, by) = (rect.x + 4.0, rect.bottom() - 7.0);
+            draw_rectangle(bx, by, bw, bh, Color::new(0.0, 0.0, 0.0, 0.6));
+            let color = Color::new(1.0 - frac, 0.3 + frac * 0.55, 0.3, 1.0);
+            draw_rectangle(bx, by, bw * frac, bh, color);
+        }
     }
 }
 
@@ -424,6 +512,16 @@ pub fn draw_item_icon(item: ItemId, rect: Rect) {
                 p(1.0, -8.0),
                 Color::from_rgba(96, 100, 116, 255),
             );
+        }
+        ItemId::Berry => {
+            let red = Color::from_rgba(196, 40, 72, 255);
+            let hi = Color::from_rgba(240, 130, 150, 255);
+            for (dx, dy) in [(-6.0, 4.0), (6.0, 4.0), (0.0, -6.0)] {
+                let b = p(dx, dy);
+                draw_circle(b.x, b.y, 7.0 * u, red);
+                draw_circle(b.x - 2.0 * u, b.y - 2.0 * u, 2.0 * u, hi);
+            }
+            line(p(0.0, -12.0), p(4.0, -18.0), 2.0, Color::from_rgba(70, 120, 50, 255));
         }
         ItemId::StonePickaxe => {
             line(p(-12.0, 14.0), p(8.0, -10.0), 4.0, wood);

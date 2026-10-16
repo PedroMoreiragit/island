@@ -3,6 +3,7 @@
 
 use macroquad::prelude::*;
 
+use crate::inventory::Stack;
 use crate::rng::{Rng, fbm};
 
 pub const TILE: f32 = 32.0;
@@ -38,6 +39,7 @@ pub enum NodeKind {
     Tree,
     Rock,
     Pebble,
+    Bush,
 }
 
 impl NodeKind {
@@ -47,6 +49,7 @@ impl NodeKind {
             NodeKind::Tree => 8,
             NodeKind::Rock => 10,
             NodeKind::Pebble => 1,
+            NodeKind::Bush => 3,
         }
     }
 
@@ -55,6 +58,7 @@ impl NodeKind {
             NodeKind::Tree => 90.0,
             NodeKind::Rock => 120.0,
             NodeKind::Pebble => 45.0,
+            NodeKind::Bush => 60.0,
         }
     }
 
@@ -63,7 +67,7 @@ impl NodeKind {
         match self {
             NodeKind::Tree => 9.0,
             NodeKind::Rock => 16.0,
-            NodeKind::Pebble => 0.0,
+            NodeKind::Pebble | NodeKind::Bush => 0.0,
         }
     }
 }
@@ -85,12 +89,39 @@ impl ResourceNode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BagKind {
+    /// Itens largados pelo jogador.
+    Dropped,
+    /// Tudo o que o jogador carregava ao morrer.
+    Death,
+}
+
+impl BagKind {
+    pub fn lifetime_secs(self) -> f32 {
+        match self {
+            BagKind::Dropped => 300.0,
+            BagKind::Death => 1800.0,
+        }
+    }
+}
+
+/// Bolsa de itens no chão; some quando esvazia ou expira.
+#[derive(Clone, Debug)]
+pub struct GroundBag {
+    pub pos: Vec2,
+    pub stacks: Vec<Stack>,
+    pub kind: BagKind,
+    pub ttl: f32,
+}
+
 pub struct World {
     pub width: usize,
     pub height: usize,
     pub seed: u64,
     tiles: Vec<Tile>,
     pub nodes: Vec<ResourceNode>,
+    pub bags: Vec<GroundBag>,
     pub spawn: Vec2,
 }
 
@@ -121,6 +152,7 @@ impl World {
             seed,
             tiles,
             nodes: Vec::new(),
+            bags: Vec::new(),
             spawn: Vec2::ZERO,
         };
         world.spawn = world.find_beach_spawn();
@@ -162,6 +194,8 @@ impl World {
                             Some(NodeKind::Rock)
                         } else if rng.chance(0.015) {
                             Some(NodeKind::Pebble)
+                        } else if rng.chance(if forest > 0.45 { 0.05 } else { 0.015 }) {
+                            Some(NodeKind::Bush)
                         } else {
                             None
                         }
@@ -212,8 +246,47 @@ impl World {
         })
     }
 
-    /// Avança respawns; um nó não renasce em cima do jogador.
+    pub fn drop_bag(&mut self, pos: Vec2, stacks: Vec<Stack>, kind: BagKind) {
+        if stacks.is_empty() {
+            return;
+        }
+        // Largar várias vezes no mesmo lugar junta tudo numa bolsa só.
+        if kind == BagKind::Dropped
+            && let Some(bag) = self
+                .bags
+                .iter_mut()
+                .find(|b| b.kind == BagKind::Dropped && b.pos.distance(pos) < 12.0)
+        {
+            bag.stacks.extend(stacks);
+            bag.ttl = kind.lifetime_secs();
+            return;
+        }
+        self.bags.push(GroundBag {
+            pos,
+            stacks,
+            kind,
+            ttl: kind.lifetime_secs(),
+        });
+    }
+
+    /// Bolsa mais próxima dentro de `reach`.
+    pub fn nearest_bag(&self, pos: Vec2, reach: f32) -> Option<usize> {
+        self.bags
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i, b.pos.distance(pos)))
+            .filter(|&(_, d)| d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// Avança respawns e expira bolsas; um nó não renasce em cima do jogador.
     pub fn update(&mut self, dt: f32, player_pos: Vec2) {
+        for bag in &mut self.bags {
+            bag.ttl -= dt;
+        }
+        self.bags.retain(|b| b.ttl > 0.0 && !b.stacks.is_empty());
+
         for node in &mut self.nodes {
             node.shake = (node.shake - dt).max(0.0);
             if node.is_alive() {
@@ -241,5 +314,6 @@ mod tests {
         assert!(count(NodeKind::Tree) > 50);
         assert!(count(NodeKind::Rock) > 5);
         assert!(count(NodeKind::Pebble) > 20);
+        assert!(count(NodeKind::Bush) > 20);
     }
 }

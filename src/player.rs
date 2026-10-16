@@ -6,6 +6,7 @@ use crate::world::World;
 
 pub const RADIUS: f32 = 7.0;
 pub const WALK_SPEED: f32 = 130.0;
+pub const SPRINT_MULT: f32 = 1.6;
 /// Distância máxima (da borda do nó) para coletar.
 pub const REACH: f32 = 30.0;
 pub const SWING_TIME: f32 = 0.3;
@@ -53,7 +54,8 @@ impl Player {
         }
     }
 
-    pub fn update(&mut self, input: Vec2, world: &World, dt: f32) {
+    /// `speed_mult` > 1 quando correndo.
+    pub fn update(&mut self, input: Vec2, speed_mult: f32, world: &World, dt: f32) {
         self.swing_timer = (self.swing_timer - dt).max(0.0);
         self.cooldown = (self.cooldown - dt).max(0.0);
 
@@ -65,10 +67,10 @@ impl Player {
         if dir.x.abs() > 0.01 {
             self.facing = if dir.x < 0.0 { Facing::Left } else { Facing::Right };
         }
-        self.anim_time += dt;
+        self.anim_time += dt * speed_mult;
 
         // Eixos separados: o jogador desliza ao encostar em obstáculos.
-        let delta = dir * WALK_SPEED * world.tile_at(self.pos).speed_factor() * dt;
+        let delta = dir * WALK_SPEED * speed_mult * world.tile_at(self.pos).speed_factor() * dt;
         let next = self.pos + vec2(delta.x, 0.0);
         if !world.blocked(next, RADIUS) {
             self.pos = next;

@@ -6,10 +6,18 @@ mod items;
 mod player;
 mod render;
 mod rng;
+mod save;
 mod ui;
+mod vitals;
 mod world;
 
+use std::path::{Path, PathBuf};
+
 use macroquad::prelude::*;
+
+use game::Game;
+
+const DEFAULT_SAVE: &str = "saves/save.json";
 
 fn window_conf() -> Conf {
     Conf {
@@ -24,18 +32,50 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Carrega o save se existir. Um save inválido é preservado como `.bak` antes de começar do zero.
+fn load_or_new(path: &Path, seed: u64) -> Game {
+    match save::read(path) {
+        Ok(Some(data)) => Game::from_save(data),
+        Ok(None) => Game::new(seed),
+        Err(e) => {
+            let backup = path.with_extension("json.bak");
+            eprintln!("Save inválido ({e}); copiado para {}", backup.display());
+            let _ = std::fs::copy(path, &backup);
+            Game::new(seed)
+        }
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let seed = env("ISLAND_SEED").and_then(|s| s.parse().ok()).unwrap_or(1337);
-    let mut game = game::Game::new(seed);
 
-    // Smoke test: ISLAND_SHOT=caminho.png salva um screenshot e encerra.
-    // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug antes da captura.
+    // Smoke test: ISLAND_SHOT=caminho.png salva um screenshot e encerra (sem ler/gravar save).
+    // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug; ISLAND_SHOT_DEAD=1 mostra a morte.
     let shot = env("ISLAND_SHOT");
-    if shot.is_some() && env("ISLAND_SHOT_INVENTORY").is_some() {
-        game.give_debug_items();
-        game.open_inventory();
-    }
+    let mut game = if shot.is_some() {
+        let mut game = Game::new(seed);
+        if env("ISLAND_SHOT_INVENTORY").is_some() {
+            game.give_debug_items();
+            game.open_inventory();
+        }
+        if env("ISLAND_SHOT_DEAD").is_some() {
+            game.give_debug_items();
+            game.kill();
+        }
+        game
+    } else {
+        let save_path = PathBuf::from(env("ISLAND_SAVE").unwrap_or_else(|| DEFAULT_SAVE.to_owned()));
+        let mut game = if env("ISLAND_NEW").is_some() {
+            Game::new(seed)
+        } else {
+            load_or_new(&save_path, seed)
+        };
+        game.set_save_path(save_path);
+        // Intercepta o fechamento da janela para salvar antes de sair.
+        prevent_quit();
+        game
+    };
 
     let mut frame = 0u32;
     loop {
@@ -48,6 +88,10 @@ async fn main() {
             && frame == 20
         {
             get_screen_data().export_png(path);
+            break;
+        }
+        if is_quit_requested() {
+            game.save();
             break;
         }
         next_frame().await;
