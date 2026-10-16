@@ -18,11 +18,14 @@ Cada marco é jogável por si só. A ordem prioriza o loop central de survival a
 - Largar itens (Q / Ctrl+Q / soltar fora do inventário) e pegar de volta (F)
 - Save/load em JSON (F5, autosave a cada 60 s, ao fechar a janela)
 
-## v0.3 — Construção
-- Colocar estruturas em grid: fogueira (luz, cozinhar carne), fundação, paredes, porta de madeira/palha
-- Baús de armazenamento
-- Ciclo dia/noite com iluminação (fogueira importa à noite)
-- Bancada / estações de crafting e fila de crafting com tempo
+## ✅ v0.3 — Construção
+- Estruturas em grid com prévia verde/vermelha: fundação, parede e porta de madeira (paredes em 3/4)
+- Fogueira que queima madeira e ilumina a noite (cozinhar fica para a v0.4, junto com a carne)
+- Caixa de armazenamento (18 slots, Shift+clique transfere)
+- Bancada: receitas de construção exigem estar perto dela
+- Fila de crafting com tempo por receita (cancelável, devolve materiais)
+- Ciclo dia/noite (12 min reais) com iluminação suave e entardecer alaranjado
+- Demolir estruturas (X) devolve o item
 
 ## v0.4 — Fauna e combate
 - Criaturas passivas (dodô, trilobita) e agressivas (dilofossauro, raptor) com IA simples (vagar, fugir, perseguir)

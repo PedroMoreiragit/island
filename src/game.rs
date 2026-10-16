@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use macroquad::prelude::*;
 
-use crate::crafting::{self, CraftError, RECIPES};
+use crate::building::{self, Layer, PlaceError, StructureKind};
+use crate::crafting::{CraftError, CraftQueue, RECIPES, Recipe};
+use crate::daynight;
 use crate::gathering;
 use crate::inventory::{HOTBAR_SIZE, INVENTORY_SIZE, Inventory, Stack};
 use crate::items::{ItemId, ToolKind};
@@ -22,6 +24,15 @@ const ZOOM: f32 = 2.0;
 const MESSAGE_TTL: f32 = 3.0;
 const AUTOSAVE_SECS: f32 = 60.0;
 const PICKUP_REACH: f32 = 28.0;
+/// Luz fraca em volta do jogador para não ficar cego à noite.
+const PLAYER_LIGHT: f32 = 56.0;
+
+/// Algo com que o jogador pode interagir com F.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Interaction {
+    Bag(usize),
+    Structure(usize),
+}
 
 pub struct Game {
     world: World,
@@ -30,6 +41,7 @@ pub struct Game {
     dead: bool,
     inventory: Inventory,
     hotbar_selected: usize,
+    queue: CraftQueue,
     ui: UiState,
     popups: Vec<Popup>,
     messages: Vec<(String, f32)>,
@@ -52,6 +64,7 @@ impl Game {
             dead: false,
             inventory: Inventory::new(INVENTORY_SIZE),
             hotbar_selected: 0,
+            queue: CraftQueue::default(),
             ui: UiState::default(),
             popups: Vec::new(),
             messages: Vec::new(),
@@ -74,6 +87,7 @@ impl Game {
             *slot = saved;
         }
         game.hotbar_selected = data.hotbar_selected.min(HOTBAR_SIZE - 1);
+        game.queue = data.craft_queue;
         for (i, hp, timer) in data.nodes {
             if let Some(node) = game.world.nodes.get_mut(i) {
                 node.hp = hp.min(node.kind.max_hp());
@@ -90,6 +104,7 @@ impl Game {
                 ttl: b.ttl,
             })
             .collect();
+        game.world.structures = data.structures;
         game.notify("Jogo carregado");
         game
     }
@@ -128,6 +143,8 @@ impl Game {
                     ttl: b.ttl,
                 })
                 .collect(),
+            structures: self.world.structures.clone(),
+            craft_queue: self.queue.clone(),
         }
     }
 
@@ -145,12 +162,14 @@ impl Game {
         self.autosave_timer = AUTOSAVE_SECS;
     }
 
+    // ---------- Atalhos de debug / smoke test ----------
+
     /// Itens iniciais para testes (F1 em builds de debug).
     pub fn give_debug_items(&mut self) {
         for (item, n) in [
-            (ItemId::Wood, 30),
-            (ItemId::Stone, 40),
-            (ItemId::Thatch, 50),
+            (ItemId::Wood, 100),
+            (ItemId::Stone, 60),
+            (ItemId::Thatch, 80),
             (ItemId::Flint, 10),
             (ItemId::Berry, 20),
         ] {
@@ -167,6 +186,47 @@ impl Game {
         self.vitals.damage(f32::MAX);
         self.die();
     }
+
+    /// Avança o relógio até a próxima ocorrência de `hour`.
+    pub fn skip_to_hour(&mut self, hour: f32) {
+        self.time += daynight::secs_until(self.time, hour);
+    }
+
+    /// Monta uma cabana de exemplo ao norte do spawn (para screenshots).
+    pub fn build_demo_base(&mut self) {
+        let (sx, sy) = building::tile_of(self.world.spawn);
+        let (x0, x1, y0, y1) = (sx - 2, sx + 2, sy - 5, sy - 2);
+        let mut place = |kind: StructureKind, tile: (i32, i32)| {
+            if self.world.tile(tile.0, tile.1).is_land() && self.world.structure_at(tile, kind.layer()).is_none() {
+                self.world.place(kind, tile);
+            }
+        };
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                place(StructureKind::WoodFoundation, (x, y));
+                let edge = x == x0 || x == x1 || y == y0 || y == y1;
+                if edge {
+                    let door = y == y1 && x == sx;
+                    place(
+                        if door {
+                            StructureKind::WoodDoor
+                        } else {
+                            StructureKind::WoodWall
+                        },
+                        (x, y),
+                    );
+                }
+            }
+        }
+        place(StructureKind::StorageBox, (sx - 1, y0 + 1));
+        place(StructureKind::Workbench, (sx + 1, y0 + 1));
+        place(StructureKind::Campfire, (sx + 2, sy));
+        if let Some(i) = self.world.structure_at((sx + 2, sy), Layer::Object) {
+            self.world.structures[i].fuel = 300.0;
+        }
+    }
+
+    // ---------- Helpers ----------
 
     /// Mensagens iguais seguidas não se acumulam: só renovam o tempo.
     fn notify(&mut self, msg: impl Into<String>) {
@@ -189,12 +249,51 @@ impl Game {
         self.equipped().and_then(ItemId::tool)
     }
 
+    /// Estrutura que o jogador está segurando para posicionar.
+    fn placing_kind(&self) -> Option<StructureKind> {
+        self.equipped().and_then(ItemId::structure)
+    }
+
+    fn station_ok(&self, recipe: &Recipe) -> bool {
+        recipe
+            .station
+            .is_none_or(|kind| self.world.station_near(kind, self.player.pos))
+    }
+
+    fn chest_mut(&mut self) -> Option<&mut Inventory> {
+        let i = self.ui.chest?;
+        self.world.structures.get_mut(i)?.storage.as_mut()
+    }
+
     fn set_inventory_open(&mut self, open: bool) {
         self.ui.inventory_open = open;
-        if !open {
-            ui::return_held(&mut self.ui, &mut self.inventory);
+        if open {
+            return;
         }
+        // O que não couber de volta no inventário vai para o baú aberto ou para o chão.
+        if let Some(left) = ui::return_held(&mut self.ui, &mut self.inventory) {
+            let left = match self.chest_mut() {
+                Some(chest) => chest.insert_stack(left),
+                None => Some(left),
+            };
+            if let Some(stack) = left {
+                self.drop_stack(stack);
+            }
+        }
+        self.ui.chest = None;
     }
+
+    fn drop_stack(&mut self, stack: Stack) {
+        let ahead = self.player.pos + vec2(16.0 * self.player.facing.sign(), 4.0);
+        let pos = if self.world.tile_at(ahead).walkable() {
+            ahead
+        } else {
+            self.player.pos
+        };
+        self.world.drop_bag(pos, vec![stack], BagKind::Dropped);
+    }
+
+    // ---------- Update ----------
 
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
@@ -215,7 +314,9 @@ impl Game {
             self.save();
         }
 
+        self.deliver_crafts(dt);
         self.world.update(dt, self.player.pos);
+        self.validate_open_chest();
 
         for p in &mut self.popups {
             p.age += dt;
@@ -234,6 +335,9 @@ impl Game {
         if is_key_pressed(KeyCode::Tab) || is_key_pressed(KeyCode::I) {
             self.set_inventory_open(!self.ui.inventory_open);
         }
+        if is_key_pressed(KeyCode::H) {
+            self.ui.hide_help = !self.ui.hide_help;
+        }
         if is_key_pressed(KeyCode::Escape) && self.ui.inventory_open {
             self.set_inventory_open(false);
         }
@@ -245,12 +349,26 @@ impl Game {
             if is_key_pressed(KeyCode::F2) {
                 self.vitals.damage(25.0);
             }
+            if is_key_pressed(KeyCode::F3) {
+                self.time += daynight::DAY_LENGTH / 8.0;
+                self.notify("+3 horas");
+            }
         }
 
         self.update_hotbar_keys();
 
-        match ui::handle_input(&mut self.ui, &mut self.inventory) {
+        let chest = self
+            .ui
+            .chest
+            .and_then(|i| self.world.structures.get_mut(i))
+            .and_then(|s| s.storage.as_mut());
+        match ui::handle_input(&mut self.ui, &mut self.inventory, chest, &self.queue) {
             Some(UiAction::Craft(i)) => self.craft(i),
+            Some(UiAction::CancelCraft(i)) => {
+                for stack in self.queue.cancel(i, &mut self.inventory) {
+                    self.drop_stack(stack);
+                }
+            }
             Some(UiAction::SelectHotbar(i)) => self.hotbar_selected = i,
             Some(UiAction::Drop(stack)) => self.drop_stack(stack),
             None => {}
@@ -265,9 +383,20 @@ impl Game {
 
         if free {
             let over_ui = ui::pointer_over_ui(&self.ui);
-            let wants_gather = is_key_down(KeyCode::E) || (is_mouse_button_down(MouseButton::Left) && !over_ui);
-            if wants_gather && self.player.cooldown <= 0.0 {
+            let placing = self.placing_kind().is_some();
+            let mouse_gather = is_mouse_button_down(MouseButton::Left) && !over_ui && !placing;
+            if (is_key_down(KeyCode::E) || mouse_gather) && self.player.cooldown <= 0.0 {
                 self.swing();
+            }
+            if placing && is_mouse_button_pressed(MouseButton::Left) && !over_ui {
+                let tile = self.mouse_tile();
+                if let Err(e) = self.place_selected_at(tile) {
+                    self.notify(e.message());
+                }
+            }
+            if is_key_pressed(KeyCode::X) {
+                let tile = self.mouse_tile();
+                self.demolish_at(tile);
             }
             if is_key_pressed(KeyCode::R) || (is_mouse_button_pressed(MouseButton::Right) && !over_ui) {
                 self.use_selected();
@@ -279,8 +408,10 @@ impl Game {
                     self.drop_stack(stack);
                 }
             }
-            if is_key_pressed(KeyCode::F) {
-                self.pick_up();
+            if is_key_pressed(KeyCode::F)
+                && let Some(target) = self.nearest_interaction()
+            {
+                self.interact(target);
             }
         }
 
@@ -309,6 +440,34 @@ impl Game {
             }
         }
     }
+
+    /// Entrega o que a fila de crafting terminou; se não couber, cai no chão.
+    fn deliver_crafts(&mut self, dt: f32) {
+        for stack in self.queue.tick(dt) {
+            let name = stack.item.name();
+            match self.inventory.insert_stack(stack) {
+                None => self.notify(format!("Fabricado: {name}")),
+                Some(left) => {
+                    self.drop_stack(left);
+                    self.notify(format!("Inventário cheio: {name} caiu no chão"));
+                }
+            }
+        }
+    }
+
+    /// Fecha o baú se ele sumiu ou se o jogador se afastou.
+    fn validate_open_chest(&mut self) {
+        let Some(i) = self.ui.chest else { return };
+        let still_valid = self.world.structures.get(i).is_some_and(|s| {
+            s.kind == StructureKind::StorageBox
+                && building::distance_to_rect(self.player.pos, s.rect()) <= building::INTERACT_REACH + 16.0
+        });
+        if !still_valid || self.dead {
+            self.set_inventory_open(false);
+        }
+    }
+
+    // ---------- Coleta, comida, água ----------
 
     /// Nó vivo mais próximo ao alcance, preferindo os que estão à frente do personagem.
     fn find_target(&self) -> Option<usize> {
@@ -409,22 +568,118 @@ impl Game {
         self.popup(at, format!("+{} Comida", effect.food));
     }
 
-    fn drop_stack(&mut self, stack: Stack) {
-        let ahead = self.player.pos + vec2(16.0 * self.player.facing.sign(), 4.0);
-        let pos = if self.world.tile_at(ahead).walkable() {
-            ahead
-        } else {
-            self.player.pos
+    // ---------- Construção ----------
+
+    fn mouse_tile(&self) -> (i32, i32) {
+        let world_pos = self.camera().screen_to_world(mouse_position().into());
+        building::tile_of(world_pos)
+    }
+
+    fn place_selected_at(&mut self, tile: (i32, i32)) -> Result<(), PlaceError> {
+        let Some(kind) = self.placing_kind() else {
+            return Ok(());
         };
-        self.world.drop_bag(pos, vec![stack], BagKind::Dropped);
+        self.world.can_place(kind, tile, self.player.pos, player::RADIUS)?;
+        self.world.place(kind, tile);
+        self.inventory.take_from_slot(self.hotbar_selected, 1);
+        Ok(())
     }
 
-    fn nearest_bag(&self) -> Option<usize> {
-        self.world.nearest_bag(self.player.pos, PICKUP_REACH)
+    /// Remove a estrutura no tile (objeto antes do piso) e devolve o item; conteúdo de baú cai no chão.
+    fn demolish_at(&mut self, tile: (i32, i32)) -> bool {
+        if building::tile_rect(tile).center().distance(self.player.pos) > building::PLACE_REACH {
+            return false;
+        }
+        let Some(i) = self
+            .world
+            .structure_at(tile, Layer::Object)
+            .or_else(|| self.world.structure_at(tile, Layer::Floor))
+        else {
+            return false;
+        };
+        self.set_inventory_open(false);
+        let mut s = self.world.structures.remove(i);
+        let center = s.rect().center();
+        if let Some(storage) = s.storage.take() {
+            let stacks: Vec<Stack> = storage.slots.into_iter().flatten().collect();
+            self.world.drop_bag(center, stacks, BagKind::Dropped);
+        }
+        let item = s.kind.item();
+        if let Some(left) = self.inventory.insert_stack(Stack::new(item, 1)) {
+            self.world.drop_bag(center, vec![left], BagKind::Dropped);
+        }
+        self.notify(format!("{} desmontada", item.name()));
+        true
     }
 
-    fn pick_up(&mut self) {
-        let Some(i) = self.nearest_bag() else { return };
+    // ---------- Interação (F) ----------
+
+    fn nearest_interaction(&self) -> Option<Interaction> {
+        let p = self.player.pos;
+        let bag = self
+            .world
+            .nearest_bag(p, PICKUP_REACH)
+            .map(|i| (self.world.bags[i].pos.distance(p), Interaction::Bag(i)));
+        let structure = self
+            .world
+            .structures
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.kind.interactive())
+            .map(|(i, s)| (building::distance_to_rect(p, s.rect()), Interaction::Structure(i)))
+            .filter(|(d, _)| *d <= building::INTERACT_REACH)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        [bag, structure]
+            .into_iter()
+            .flatten()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, target)| target)
+    }
+
+    fn interact(&mut self, target: Interaction) {
+        match target {
+            Interaction::Bag(i) => self.pick_up(i),
+            Interaction::Structure(i) => match self.world.structures[i].kind {
+                StructureKind::WoodDoor => self.toggle_door(i),
+                StructureKind::StorageBox => {
+                    self.ui.chest = Some(i);
+                    self.ui.inventory_open = true;
+                }
+                StructureKind::Workbench => self.set_inventory_open(true),
+                StructureKind::Campfire => self.feed_campfire(i),
+                StructureKind::WoodFoundation | StructureKind::WoodWall => {}
+            },
+        }
+    }
+
+    fn toggle_door(&mut self, i: usize) {
+        let door = &self.world.structures[i];
+        let mut closed = door.clone();
+        closed.open = false;
+        if door.open && closed.blocks(self.player.pos, player::RADIUS) {
+            self.notify("Saia da porta para fechá-la");
+            return;
+        }
+        let door = &mut self.world.structures[i];
+        door.open = !door.open;
+    }
+
+    fn feed_campfire(&mut self, i: usize) {
+        if self.inventory.count(ItemId::Wood) == 0 {
+            self.notify("Precisa de Madeira");
+            return;
+        }
+        let fire = &mut self.world.structures[i];
+        if !fire.add_fuel() {
+            self.notify("A fogueira já está cheia");
+            return;
+        }
+        let at = fire.rect().center() - vec2(0.0, 20.0);
+        self.inventory.remove(ItemId::Wood, 1);
+        self.popup(at, "+1 min de fogo".to_owned());
+    }
+
+    fn pick_up(&mut self, i: usize) {
         let bag = &mut self.world.bags[i];
         let before: u32 = bag.stacks.iter().map(|s| s.count).sum();
         self.inventory.take_all(&mut bag.stacks);
@@ -438,13 +693,21 @@ impl Game {
         }
     }
 
+    // ---------- Morte ----------
+
     fn die(&mut self) {
         if self.dead {
             return;
         }
         self.dead = true;
         self.set_inventory_open(false);
-        let stacks = self.inventory.drain_all();
+        // A fila é cancelada: os materiais voltam e vão junto para a bolsa.
+        let mut leftovers = Vec::new();
+        while !self.queue.jobs.is_empty() {
+            leftovers.extend(self.queue.cancel(0, &mut self.inventory));
+        }
+        let mut stacks = self.inventory.drain_all();
+        stacks.extend(leftovers);
         self.world.drop_bag(self.player.pos, stacks, BagKind::Death);
         self.player.moving = false;
     }
@@ -459,12 +722,16 @@ impl Game {
 
     fn craft(&mut self, index: usize) {
         let recipe = &RECIPES[index];
-        match crafting::craft(&mut self.inventory, recipe) {
-            Ok(()) => self.notify(format!("Fabricado: {}", recipe.output.name())),
+        let station_near = self.station_ok(recipe);
+        match self.queue.enqueue(&mut self.inventory, recipe, station_near) {
+            Ok(()) => {}
             Err(CraftError::MissingIngredients) => self.notify("Faltam materiais"),
-            Err(CraftError::InventoryFull) => self.notify("Inventário cheio!"),
+            Err(CraftError::NeedsStation(kind)) => self.notify(format!("Requer {} por perto", kind.item().name())),
+            Err(CraftError::QueueFull) => self.notify("Fila de crafting cheia"),
         }
     }
+
+    // ---------- Desenho ----------
 
     fn camera(&self) -> Camera2D {
         let half = vec2(screen_width(), screen_height()) / (2.0 * ZOOM);
@@ -499,18 +766,57 @@ impl Game {
         let player = (!self.dead).then_some(&self.player);
         render::draw_entities(&self.world, player, self.equipped(), target, view, self.time);
 
+        let hour = daynight::hour(self.time);
+        let flicker = 1.0 + (self.time * 9.0).sin() * 0.03 + (self.time * 23.0).sin() * 0.02;
+        let mut lights: Vec<(Vec2, f32, bool)> = self.world.lights().map(|(p, r)| (p, r * flicker, true)).collect();
+        if !self.dead {
+            lights.push((self.player.pos - vec2(0.0, 12.0), PLAYER_LIGHT, false));
+        }
+        render::draw_golden_hour(view, daynight::golden_hour(hour));
+        render::draw_lighting(view, daynight::darkness(hour), &lights);
+
+        if interactive && let Some(kind) = self.placing_kind() {
+            let tile = self.mouse_tile();
+            let valid = self
+                .world
+                .can_place(kind, tile, self.player.pos, player::RADIUS)
+                .is_ok();
+            render::draw_ghost(kind, tile, valid);
+        }
+
         set_default_camera();
         render::draw_popups(&self.popups, &camera);
-        if interactive && let Some(bag) = self.nearest_bag().map(|i| &self.world.bags[i]) {
-            render::draw_bag_prompt(bag, &camera);
+        if interactive && let Some(target) = self.nearest_interaction() {
+            let (label, pos) = match target {
+                Interaction::Bag(i) => {
+                    let bag = &self.world.bags[i];
+                    (render::bag_label(bag), bag.pos - vec2(0.0, 26.0))
+                }
+                Interaction::Structure(i) => {
+                    let s = &self.world.structures[i];
+                    let r = s.rect();
+                    (render::structure_label(s), vec2(r.center().x, r.y - 30.0))
+                }
+            };
+            render::draw_prompt(&label, pos, &camera);
         }
+
+        let chest = self
+            .ui
+            .chest
+            .and_then(|i| self.world.structures.get(i))
+            .and_then(|s| s.storage.as_ref());
         ui::draw(&ui::Hud {
             ui: &self.ui,
             inventory: &self.inventory,
+            chest,
+            queue: &self.queue,
+            station_ok: &|recipe| self.station_ok(recipe),
             selected: self.hotbar_selected,
             messages: &self.messages,
             vitals: &self.vitals,
             dead: self.dead,
+            time: self.time,
         });
     }
 }
@@ -542,6 +848,8 @@ mod tests {
         game.inventory.add(ItemId::StonePickaxe, 1);
         game.inventory.wear(0);
         game.inventory.add(ItemId::Berry, 7);
+        game.inventory.add(ItemId::Wood, 50);
+        game.inventory.add(ItemId::Thatch, 50);
         game.hotbar_selected = 1;
         game.vitals.food = 42.0;
         game.player.pos += vec2(10.0, -5.0);
@@ -549,12 +857,18 @@ mod tests {
         game.world.nodes[5].respawn_timer = 33.0;
         game.world
             .drop_bag(vec2(50.0, 60.0), vec![Stack::new(ItemId::Wood, 3)], BagKind::Dropped);
+        game.world.place(StructureKind::StorageBox, (3, 4));
+        game.world.structures[0].storage.as_mut().unwrap().add(ItemId::Flint, 9);
+        let spear = crate::crafting::recipe_for(ItemId::WoodenSpear).unwrap();
+        game.queue.enqueue(&mut game.inventory, spear, false).unwrap();
+        game.queue.tick(1.0);
 
         let saved = game.to_save();
         let json = serde_json::to_string(&saved).unwrap();
         let loaded = Game::from_save(serde_json::from_str(&json).unwrap());
         assert_eq!(loaded.to_save(), saved);
         assert_eq!(loaded.inventory.slots[0].unwrap().durability, 99);
+        assert_eq!(loaded.queue.jobs.len(), 1);
     }
 
     #[test]
@@ -568,5 +882,45 @@ mod tests {
         assert_eq!(bag.stacks[0].count, 10);
         game.respawn();
         assert!(!game.dead && !game.vitals.is_dead());
+    }
+
+    #[test]
+    fn place_and_demolish_returns_item_and_chest_contents() {
+        let mut game = Game::new(1337);
+        game.inventory.add(ItemId::StorageBox, 1);
+        let here = building::tile_of(game.player.pos);
+        let next = (here.0 + 1, here.1);
+
+        assert_eq!(game.place_selected_at(here), Err(PlaceError::Blocked));
+        assert_eq!(game.place_selected_at(next), Ok(()));
+        assert_eq!(game.inventory.count(ItemId::StorageBox), 0);
+
+        let i = game.world.structure_at(next, Layer::Object).unwrap();
+        game.world.structures[i].storage.as_mut().unwrap().add(ItemId::Stone, 5);
+        assert!(game.demolish_at(next));
+        assert_eq!(game.inventory.count(ItemId::StorageBox), 1);
+        let dropped: u32 = game.world.bags.iter().flat_map(|b| &b.stacks).map(|s| s.count).sum();
+        assert_eq!(dropped, 5);
+    }
+
+    #[test]
+    fn campfire_burns_wood_and_doors_toggle() {
+        let mut game = Game::new(1337);
+        let here = building::tile_of(game.player.pos);
+        game.world.place(StructureKind::Campfire, (here.0 + 1, here.1));
+        game.world.place(StructureKind::WoodDoor, (here.0 - 1, here.1));
+
+        game.feed_campfire(0);
+        assert!(!game.world.structures[0].is_lit(), "sem madeira não acende");
+        game.inventory.add(ItemId::Wood, 2);
+        game.feed_campfire(0);
+        assert!(game.world.structures[0].is_lit());
+        assert_eq!(game.inventory.count(ItemId::Wood), 1);
+        assert_eq!(game.world.lights().count(), 1);
+
+        game.toggle_door(1);
+        assert!(game.world.structures[1].open);
+        game.toggle_door(1);
+        assert!(!game.world.structures[1].open);
     }
 }

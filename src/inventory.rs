@@ -33,7 +33,7 @@ impl Stack {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
     pub slots: Vec<Option<Stack>>,
 }

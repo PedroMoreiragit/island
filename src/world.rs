@@ -3,6 +3,7 @@
 
 use macroquad::prelude::*;
 
+use crate::building::{self, Layer, PlaceError, Structure, StructureKind};
 use crate::inventory::Stack;
 use crate::rng::{Rng, fbm};
 
@@ -122,6 +123,7 @@ pub struct World {
     tiles: Vec<Tile>,
     pub nodes: Vec<ResourceNode>,
     pub bags: Vec<GroundBag>,
+    pub structures: Vec<Structure>,
     pub spawn: Vec2,
 }
 
@@ -153,6 +155,7 @@ impl World {
             tiles,
             nodes: Vec::new(),
             bags: Vec::new(),
+            structures: Vec::new(),
             spawn: Vec2::ZERO,
         };
         world.spawn = world.find_beach_spawn();
@@ -240,10 +243,70 @@ impl World {
         if probes.iter().any(|&p| !self.tile_at(p).walkable()) {
             return true;
         }
-        self.nodes.iter().any(|n| {
+        let node_hit = self.nodes.iter().any(|n| {
             let r = n.kind.collision_radius();
             r > 0.0 && n.is_alive() && n.pos.distance_squared(pos) < (r + radius).powi(2)
-        })
+        });
+        node_hit
+            || self
+                .structures
+                .iter()
+                .any(|s| s.rect().center().distance(pos) < TILE * 1.5 && s.blocks(pos, radius))
+    }
+
+    pub fn structure_at(&self, tile: (i32, i32), layer: Layer) -> Option<usize> {
+        self.structures
+            .iter()
+            .position(|s| s.tile == tile && s.kind.layer() == layer)
+    }
+
+    /// Pode posicionar `kind` no `tile`, com o jogador (círculo) em `player_pos`?
+    pub fn can_place(
+        &self,
+        kind: StructureKind,
+        tile: (i32, i32),
+        player_pos: Vec2,
+        player_radius: f32,
+    ) -> Result<(), PlaceError> {
+        let rect = building::tile_rect(tile);
+        if rect.center().distance(player_pos) > building::PLACE_REACH {
+            return Err(PlaceError::TooFar);
+        }
+        if !self.tile(tile.0, tile.1).is_land() {
+            return Err(PlaceError::NotLand);
+        }
+        if self.structure_at(tile, kind.layer()).is_some() {
+            return Err(PlaceError::Occupied);
+        }
+        // Árvores, rochas e afins (mesmo esgotados, pois vão renascer) ocupam o tile.
+        let node_inside = self.nodes.iter().any(|n| {
+            let r = n.kind.collision_radius().max(6.0);
+            building::distance_to_rect(n.pos, rect) < r
+        });
+        let candidate = Structure::new(kind, tile);
+        if node_inside || candidate.blocks(player_pos, player_radius) {
+            return Err(PlaceError::Blocked);
+        }
+        Ok(())
+    }
+
+    pub fn place(&mut self, kind: StructureKind, tile: (i32, i32)) {
+        self.structures.push(Structure::new(kind, tile));
+    }
+
+    /// Alguma estação do tipo `kind` dentro do alcance de `pos`?
+    pub fn station_near(&self, kind: StructureKind, pos: Vec2) -> bool {
+        self.structures
+            .iter()
+            .any(|s| s.kind == kind && s.rect().center().distance(pos) <= building::STATION_RANGE)
+    }
+
+    /// Fontes de luz ativas: (posição, raio).
+    pub fn lights(&self) -> impl Iterator<Item = (Vec2, f32)> + '_ {
+        self.structures
+            .iter()
+            .filter(|s| s.is_lit())
+            .map(|s| (s.rect().center() + vec2(0.0, 6.0), building::CAMPFIRE_LIGHT))
     }
 
     pub fn drop_bag(&mut self, pos: Vec2, stacks: Vec<Stack>, kind: BagKind) {
@@ -287,6 +350,10 @@ impl World {
         }
         self.bags.retain(|b| b.ttl > 0.0 && !b.stacks.is_empty());
 
+        for s in &mut self.structures {
+            s.fuel = (s.fuel - dt).max(0.0);
+        }
+
         for node in &mut self.nodes {
             node.shake = (node.shake - dt).max(0.0);
             if node.is_alive() {
@@ -315,5 +382,39 @@ mod tests {
         assert!(count(NodeKind::Rock) > 5);
         assert!(count(NodeKind::Pebble) > 20);
         assert!(count(NodeKind::Bush) > 20);
+    }
+
+    #[test]
+    fn placement_rules() {
+        let mut world = World::generate(1337, 160, 160);
+        let player = world.spawn;
+        let here = building::tile_of(player);
+        let next = (here.0 + 1, here.1);
+        let wall = StructureKind::WoodWall;
+
+        assert_eq!(world.can_place(wall, here, player, 7.0), Err(PlaceError::Blocked));
+        assert_eq!(
+            world.can_place(wall, (here.0 + 10, here.1), player, 7.0),
+            Err(PlaceError::TooFar)
+        );
+        assert_eq!(
+            world.can_place(StructureKind::WoodFoundation, here, player, 7.0),
+            Ok(())
+        );
+        assert_eq!(world.can_place(wall, next, player, 7.0), Ok(()));
+
+        world.place(wall, next);
+        assert_eq!(world.can_place(wall, next, player, 7.0), Err(PlaceError::Occupied));
+        assert_eq!(
+            world.can_place(StructureKind::WoodFoundation, next, player, 7.0),
+            Ok(())
+        );
+        assert!(world.blocked(building::tile_rect(next).center(), 7.0));
+
+        let water = (0, 0);
+        assert_eq!(
+            world.can_place(wall, water, building::tile_rect(water).center(), 7.0),
+            Err(PlaceError::NotLand)
+        );
     }
 }

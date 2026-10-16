@@ -6,6 +6,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::building::Structure;
+use crate::crafting::CraftQueue;
 use crate::inventory::Stack;
 use crate::vitals::Vitals;
 use crate::world::BagKind;
@@ -25,6 +27,11 @@ pub struct SaveData {
     /// Apenas nós alterados: (índice, hp, respawn_timer).
     pub nodes: Vec<(usize, u32, f32)>,
     pub bags: Vec<BagSave>,
+    /// Campos novos usam `default` para saves antigos continuarem válidos.
+    #[serde(default)]
+    pub structures: Vec<Structure>,
+    #[serde(default)]
+    pub craft_queue: CraftQueue,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +93,8 @@ mod tests {
                 kind: BagKind::Death,
                 ttl: 99.0,
             }],
+            structures: vec![Structure::new(crate::building::StructureKind::StorageBox, (1, 2))],
+            craft_queue: CraftQueue::default(),
         };
         let path = std::env::temp_dir().join(format!("island-test-{}/save.json", std::process::id()));
         write(&path, &data).unwrap();
@@ -96,5 +105,14 @@ mod tests {
     #[test]
     fn missing_file_is_none() {
         assert_eq!(read(Path::new("nao/existe/save.json")).unwrap(), None);
+    }
+
+    #[test]
+    fn v02_save_without_new_fields_still_loads() {
+        let json = r#"{"version":1,"seed":1,"time":0.0,"player_pos":[0.0,0.0],"facing_left":false,
+            "vitals":{"health":100.0,"food":100.0,"water":100.0,"stamina":100.0,"exhausted":false},
+            "inventory":[],"hotbar_selected":0,"nodes":[],"bags":[]}"#;
+        let data: SaveData = serde_json::from_str(json).unwrap();
+        assert!(data.structures.is_empty() && data.craft_queue.jobs.is_empty());
     }
 }

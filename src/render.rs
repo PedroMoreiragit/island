@@ -3,6 +3,7 @@
 
 use macroquad::prelude::*;
 
+use crate::building::{self, Structure, StructureKind};
 use crate::items::ItemId;
 use crate::player::{Player, SWING_TIME};
 use crate::rng::hash2;
@@ -57,6 +58,32 @@ pub fn draw_ground(world: &World, view: Rect, time: f32) {
             }
         }
     }
+
+    for s in world
+        .structures
+        .iter()
+        .filter(|s| s.kind == StructureKind::WoodFoundation)
+    {
+        let r = s.rect();
+        if r.overlaps(&view) {
+            draw_foundation(r);
+        }
+    }
+}
+
+const WOOD_TOP: Color = Color::new(0.80, 0.60, 0.38, 1.0);
+const WOOD_FRONT: Color = Color::new(0.52, 0.36, 0.20, 1.0);
+const WOOD_LINE: Color = Color::new(0.38, 0.25, 0.13, 1.0);
+/// Altura visual de paredes e portas (em pixels de mundo).
+const WALL_H: f32 = 24.0;
+
+fn draw_foundation(r: Rect) {
+    draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.60, 0.43, 0.25, 1.0));
+    for i in 1..4 {
+        let y = r.y + i as f32 * r.h / 4.0;
+        draw_line(r.x, y, r.right(), y, 1.0, WOOD_LINE);
+    }
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, WOOD_LINE);
 }
 
 /// Espuma nas bordas da água rasa que encostam em terra.
@@ -81,6 +108,7 @@ fn draw_foam(world: &World, x: i32, y: i32, px: f32, py: f32, time: f32) {
 enum Drawable<'a> {
     Node(&'a ResourceNode),
     Bag(&'a GroundBag),
+    Structure(&'a Structure),
     Player(&'a Player),
 }
 
@@ -128,6 +156,13 @@ pub fn draw_entities(
             .filter(|b| culled.contains(b.pos))
             .map(|b| (b.pos.y, Drawable::Bag(b))),
     );
+    list.extend(
+        world
+            .structures
+            .iter()
+            .filter(|s| s.kind != StructureKind::WoodFoundation && s.rect().overlaps(&culled))
+            .map(|s| (s.sort_y(), Drawable::Structure(s))),
+    );
     if let Some(p) = player {
         list.push((p.pos.y, Drawable::Player(p)));
     }
@@ -137,6 +172,7 @@ pub fn draw_entities(
         match d {
             Drawable::Node(n) => draw_node(n, player_pos),
             Drawable::Bag(b) => draw_bag(b, time),
+            Drawable::Structure(s) => draw_structure(s, time),
             Drawable::Player(p) => draw_player(p, held),
         }
     }
@@ -242,17 +278,35 @@ fn draw_bag(bag: &GroundBag, time: f32) {
     }
 }
 
-/// "[F] Pegar" acima da bolsa mais próxima (espaço de tela).
-pub fn draw_bag_prompt(bag: &GroundBag, camera: &Camera2D) {
-    let label = match (bag.kind, bag.stacks.as_slice()) {
+pub fn bag_label(bag: &GroundBag) -> String {
+    match (bag.kind, bag.stacks.as_slice()) {
         (BagKind::Death, _) => "[F] Pegar seus itens".to_owned(),
         (_, [only]) if only.count > 1 => format!("[F] Pegar {} {}", only.count, only.item.name()),
         (_, [only]) => format!("[F] Pegar {}", only.item.name()),
         (_, stacks) => format!("[F] Pegar bolsa ({} pilhas)", stacks.len()),
-    };
-    let at = camera.world_to_screen(bag.pos - vec2(0.0, 26.0));
+    }
+}
+
+pub fn structure_label(s: &Structure) -> String {
+    match s.kind {
+        StructureKind::WoodDoor if s.open => "[F] Fechar porta".to_owned(),
+        StructureKind::WoodDoor => "[F] Abrir porta".to_owned(),
+        StructureKind::StorageBox => "[F] Abrir caixa".to_owned(),
+        StructureKind::Workbench => "[F] Usar bancada".to_owned(),
+        StructureKind::Campfire if s.is_lit() => {
+            let secs = s.fuel.ceil() as u32;
+            format!("[F] Pôr madeira (fogo: {}:{:02})", secs / 60, secs % 60)
+        }
+        StructureKind::Campfire => "[F] Acender (1 Madeira)".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Dica de interação ("[F] ...") acima de um ponto do mundo (desenhada em espaço de tela).
+pub fn draw_prompt(label: &str, world_pos: Vec2, camera: &Camera2D) {
+    let at = camera.world_to_screen(world_pos);
     let size = 20.0;
-    let w = measure_text(&label, None, size as u16, 1.0).width;
+    let w = measure_text(label, None, size as u16, 1.0).width;
     draw_rectangle(
         at.x - w / 2.0 - 6.0,
         at.y - 18.0,
@@ -260,7 +314,193 @@ pub fn draw_bag_prompt(bag: &GroundBag, camera: &Camera2D) {
         24.0,
         Color::new(0.0, 0.0, 0.0, 0.6),
     );
-    draw_text(&label, at.x - w / 2.0, at.y, size, WHITE);
+    draw_text(label, at.x - w / 2.0, at.y, size, WHITE);
+}
+
+fn draw_structure(s: &Structure, time: f32) {
+    let r = s.rect();
+    match s.kind {
+        StructureKind::WoodWall => draw_block(r, WOOD_TOP, WOOD_FRONT, true),
+        StructureKind::WoodDoor if s.open => {
+            // Batentes nas laterais; folha da porta encostada à esquerda.
+            for x in [r.x, r.right() - 5.0] {
+                draw_rectangle(x, r.y - WALL_H, 5.0, r.h + WALL_H, WOOD_FRONT);
+            }
+            draw_rectangle(r.x + 5.0, r.y - WALL_H + 4.0, 4.0, r.h + WALL_H - 4.0, WOOD_TOP);
+        }
+        StructureKind::WoodDoor => {
+            draw_block(r, WOOD_TOP, Color::new(0.45, 0.30, 0.17, 1.0), false);
+            let front = r.bottom() - WALL_H;
+            draw_rectangle_lines(r.x + 6.0, front + 2.0, r.w - 12.0, WALL_H - 2.0, 1.5, WOOD_LINE);
+            draw_circle(
+                r.right() - 10.0,
+                front + WALL_H * 0.55,
+                1.6,
+                Color::new(0.85, 0.75, 0.4, 1.0),
+            );
+        }
+        StructureKind::StorageBox => {
+            let (x, w) = (r.x + 5.0, r.w - 10.0);
+            let base = r.bottom() - 4.0;
+            draw_ellipse(r.center().x, base, w / 2.0 + 2.0, 4.0, 0.0, SHADOW);
+            draw_rectangle(x, base - 14.0, w, 14.0, WOOD_FRONT);
+            draw_rectangle(x, base - 22.0, w, 8.0, WOOD_TOP);
+            draw_rectangle(
+                r.center().x - 2.0,
+                base - 16.0,
+                4.0,
+                6.0,
+                Color::new(0.75, 0.70, 0.55, 1.0),
+            );
+            for sx in [x + 3.0, x + w - 6.0] {
+                draw_rectangle(sx, base - 22.0, 3.0, 22.0, WOOD_LINE);
+            }
+        }
+        StructureKind::Workbench => {
+            let base = r.bottom() - 4.0;
+            draw_ellipse(r.center().x, base, r.w / 2.0, 4.0, 0.0, SHADOW);
+            for lx in [r.x + 4.0, r.right() - 8.0] {
+                draw_rectangle(lx, base - 14.0, 4.0, 14.0, WOOD_LINE);
+            }
+            draw_rectangle(r.x + 1.0, base - 22.0, r.w - 2.0, 6.0, WOOD_TOP);
+            draw_rectangle(r.x + 1.0, base - 16.0, r.w - 2.0, 3.0, WOOD_FRONT);
+            // Ferramentas em cima
+            let stone = Color::from_rgba(150, 150, 158, 255);
+            draw_line(r.x + 7.0, base - 24.0, r.x + 16.0, base - 27.0, 2.0, WOOD_LINE);
+            draw_rectangle(r.x + 14.0, base - 30.0, 5.0, 4.0, stone);
+            draw_circle(r.right() - 8.0, base - 25.0, 3.0, stone);
+        }
+        StructureKind::Campfire => draw_campfire(r, s.is_lit(), time),
+        StructureKind::WoodFoundation => draw_foundation(r),
+    }
+}
+
+/// Bloco em 3/4: face de cima deslocada para cima + face frontal.
+fn draw_block(r: Rect, top: Color, front: Color, planks: bool) {
+    draw_rectangle(r.x, r.y - WALL_H, r.w, r.h, top);
+    // Moldura interna na face de cima, para não confundir com o piso.
+    draw_rectangle_lines(r.x + 4.0, r.y - WALL_H + 4.0, r.w - 8.0, r.h - 8.0, 1.0, WOOD_LINE);
+    let front_y = r.bottom() - WALL_H;
+    draw_rectangle(r.x, front_y, r.w, WALL_H, front);
+    if planks {
+        for i in 1..4 {
+            let x = r.x + i as f32 * r.w / 4.0;
+            draw_line(x, front_y, x, r.bottom(), 1.0, WOOD_LINE);
+        }
+    }
+    draw_line(r.x, front_y, r.right(), front_y, 1.5, WOOD_LINE);
+    draw_rectangle_lines(r.x, r.y - WALL_H, r.w, r.h + WALL_H, 1.0, WOOD_LINE);
+}
+
+fn draw_campfire(r: Rect, lit: bool, time: f32) {
+    let c = vec2(r.center().x, r.bottom() - 10.0);
+    let stone = Color::from_rgba(120, 118, 122, 255);
+    for i in 0..8 {
+        let a = i as f32 / 8.0 * std::f32::consts::TAU;
+        draw_circle(c.x + a.cos() * 11.0, c.y + a.sin() * 5.0, 3.0, stone);
+    }
+    let wood = Color::from_rgba(110, 72, 40, 255);
+    draw_line(c.x - 8.0, c.y + 2.0, c.x + 8.0, c.y - 2.0, 3.0, wood);
+    draw_line(c.x - 8.0, c.y - 2.0, c.x + 8.0, c.y + 2.0, 3.0, wood);
+    if lit {
+        let flick = (time * 14.0).sin() * 2.0 + (time * 23.0).sin();
+        draw_triangle(
+            vec2(c.x - 7.0, c.y),
+            vec2(c.x + 7.0, c.y),
+            vec2(c.x + flick * 0.5, c.y - 20.0 - flick),
+            Color::from_rgba(240, 110, 30, 255),
+        );
+        draw_triangle(
+            vec2(c.x - 4.0, c.y),
+            vec2(c.x + 4.0, c.y),
+            vec2(c.x - flick * 0.3, c.y - 11.0 + flick * 0.5),
+            Color::from_rgba(255, 215, 90, 255),
+        );
+    }
+}
+
+/// Prévia translúcida da estrutura a posicionar, verde se válida e vermelha se não.
+pub fn draw_ghost(kind: StructureKind, tile: (i32, i32), valid: bool) {
+    let r = building::tile_rect(tile);
+    let color = if valid {
+        Color::new(0.4, 1.0, 0.5, 0.35)
+    } else {
+        Color::new(1.0, 0.35, 0.3, 0.35)
+    };
+    draw_rectangle(r.x, r.y, r.w, r.h, color);
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.5, color.with_alpha(0.9));
+    crate::ui::draw_item_icon(kind.item(), Rect::new(r.x + 4.0, r.y + 4.0, r.w - 8.0, r.h - 8.0));
+}
+
+/// Escuridão noturna como malha com cor por vértice: gradientes suaves em volta das luzes.
+/// `lights`: (posição, raio, quente) — luzes quentes tingem de laranja.
+pub fn draw_lighting(view: Rect, darkness: f32, lights: &[(Vec2, f32, bool)]) {
+    if darkness <= 0.01 {
+        return;
+    }
+    const CELL: f32 = 8.0;
+    let cols = (view.w / CELL).ceil() as usize + 1;
+    let rows = (view.h / CELL).ceil() as usize + 1;
+    let (x0, y0) = ((view.x / CELL).floor() * CELL, (view.y / CELL).floor() * CELL);
+    let night = Color::new(0.02, 0.03, 0.10, 1.0);
+    let fire = Color::new(1.0, 0.55, 0.15, 1.0);
+
+    let vertex_color = |p: Vec2| {
+        let (mut lit, mut warm) = (0.0f32, 0.0f32);
+        for &(pos, radius, hot) in lights {
+            let t = (1.0 - p.distance(pos) / radius).clamp(0.0, 1.0);
+            let t = t * t * (3.0 - 2.0 * t);
+            lit = lit.max(t);
+            if hot {
+                warm = warm.max(t);
+            }
+        }
+        let alpha = darkness * (1.0 - lit) + warm * 0.18 * darkness;
+        let c = Color::new(
+            night.r + (fire.r - night.r) * warm,
+            night.g + (fire.g - night.g) * warm,
+            night.b + (fire.b - night.b) * warm,
+            alpha,
+        );
+        Vertex::new(p.x, p.y, 0.0, 0.0, 0.0, c)
+    };
+
+    // Uma faixa por linha para respeitar o limite de índices por desenho do macroquad.
+    let mut top: Vec<Vertex> = (0..=cols)
+        .map(|c| vertex_color(vec2(x0 + c as f32 * CELL, y0)))
+        .collect();
+    for row in 1..=rows {
+        let y = y0 + row as f32 * CELL;
+        let bottom: Vec<Vertex> = (0..=cols)
+            .map(|c| vertex_color(vec2(x0 + c as f32 * CELL, y)))
+            .collect();
+        let mut vertices = Vec::with_capacity((cols + 1) * 2);
+        vertices.extend_from_slice(&top);
+        vertices.extend_from_slice(&bottom);
+        let n = cols as u16 + 1;
+        let indices = (0..cols as u16)
+            .flat_map(|c| [c, c + 1, n + c, c + 1, n + c + 1, n + c])
+            .collect();
+        draw_mesh(&Mesh {
+            vertices,
+            indices,
+            texture: None,
+        });
+        top = bottom;
+    }
+}
+
+/// Tom alaranjado do nascer/pôr do sol, sobre a tela toda.
+pub fn draw_golden_hour(view: Rect, intensity: f32) {
+    if intensity > 0.01 {
+        draw_rectangle(
+            view.x,
+            view.y,
+            view.w,
+            view.h,
+            Color::new(1.0, 0.45, 0.15, 0.16 * intensity),
+        );
+    }
 }
 
 fn draw_rock(pos: Vec2, variant: u8) {

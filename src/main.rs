@@ -1,7 +1,9 @@
 // Em release no Windows, abre só a janela do jogo (sem console).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod building;
 mod crafting;
+mod daynight;
 mod game;
 mod gathering;
 mod inventory;
@@ -54,13 +56,20 @@ async fn main() {
     let seed = env("ISLAND_SEED").and_then(|s| s.parse().ok()).unwrap_or(1337);
 
     // Smoke test: ISLAND_SHOT=caminho.png salva um screenshot e encerra (sem ler/gravar save).
-    // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug; ISLAND_SHOT_DEAD=1 mostra a morte.
+    // ISLAND_SHOT_INVENTORY=1 abre o inventário com itens de debug; ISLAND_SHOT_DEAD=1 mostra a morte;
+    // ISLAND_SHOT_BUILD=1 monta uma cabana de exemplo; ISLAND_SHOT_HOUR=22 ajusta o relógio.
     let shot = env("ISLAND_SHOT");
     let mut game = if shot.is_some() {
         let mut game = Game::new(seed);
         if env("ISLAND_SHOT_INVENTORY").is_some() {
             game.give_debug_items();
             game.open_inventory();
+        }
+        if env("ISLAND_SHOT_BUILD").is_some() {
+            game.build_demo_base();
+        }
+        if let Some(hour) = env("ISLAND_SHOT_HOUR").and_then(|h| h.parse().ok()) {
+            game.skip_to_hour(hour);
         }
         if env("ISLAND_SHOT_DEAD").is_some() {
             game.give_debug_items();

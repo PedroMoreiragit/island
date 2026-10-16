@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::building::StructureKind;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ItemId {
     Wood,
@@ -13,6 +15,11 @@ pub enum ItemId {
     StoneHatchet,
     WoodenSpear,
     Campfire,
+    Workbench,
+    StorageBox,
+    WoodFoundation,
+    WoodWall,
+    WoodDoor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +37,24 @@ pub struct FoodEffect {
 }
 
 impl ItemId {
+    #[cfg(test)]
+    pub const ALL: [ItemId; 14] = [
+        ItemId::Wood,
+        ItemId::Thatch,
+        ItemId::Stone,
+        ItemId::Flint,
+        ItemId::Berry,
+        ItemId::StonePickaxe,
+        ItemId::StoneHatchet,
+        ItemId::WoodenSpear,
+        ItemId::Campfire,
+        ItemId::Workbench,
+        ItemId::StorageBox,
+        ItemId::WoodFoundation,
+        ItemId::WoodWall,
+        ItemId::WoodDoor,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             ItemId::Wood => "Madeira",
@@ -41,13 +66,19 @@ impl ItemId {
             ItemId::StoneHatchet => "Machado de Pedra",
             ItemId::WoodenSpear => "Lança de Madeira",
             ItemId::Campfire => "Fogueira",
+            ItemId::Workbench => "Bancada",
+            ItemId::StorageBox => "Caixa de Armazenamento",
+            ItemId::WoodFoundation => "Fundação de Madeira",
+            ItemId::WoodWall => "Parede de Madeira",
+            ItemId::WoodDoor => "Porta de Madeira",
         }
     }
 
     pub fn max_stack(self) -> u32 {
         match self {
             ItemId::Wood | ItemId::Thatch | ItemId::Stone | ItemId::Flint | ItemId::Berry => 100,
-            ItemId::Campfire => 5,
+            ItemId::Campfire | ItemId::Workbench | ItemId::StorageBox => 5,
+            ItemId::WoodFoundation | ItemId::WoodWall | ItemId::WoodDoor => 20,
             ItemId::StonePickaxe | ItemId::StoneHatchet | ItemId::WoodenSpear => 1,
         }
     }
@@ -57,6 +88,19 @@ impl ItemId {
             ItemId::StonePickaxe => Some(ToolKind::Pickaxe),
             ItemId::StoneHatchet => Some(ToolKind::Hatchet),
             ItemId::WoodenSpear => Some(ToolKind::Spear),
+            _ => None,
+        }
+    }
+
+    /// Estrutura que o item vira ao ser posicionado no mundo.
+    pub fn structure(self) -> Option<StructureKind> {
+        match self {
+            ItemId::Campfire => Some(StructureKind::Campfire),
+            ItemId::Workbench => Some(StructureKind::Workbench),
+            ItemId::StorageBox => Some(StructureKind::StorageBox),
+            ItemId::WoodFoundation => Some(StructureKind::WoodFoundation),
+            ItemId::WoodWall => Some(StructureKind::WoodWall),
+            ItemId::WoodDoor => Some(StructureKind::WoodDoor),
             _ => None,
         }
     }
@@ -88,20 +132,18 @@ mod tests {
 
     #[test]
     fn durable_items_never_stack() {
-        let all = [
-            ItemId::Wood,
-            ItemId::Thatch,
-            ItemId::Stone,
-            ItemId::Flint,
-            ItemId::Berry,
-            ItemId::StonePickaxe,
-            ItemId::StoneHatchet,
-            ItemId::WoodenSpear,
-            ItemId::Campfire,
-        ];
-        for item in all {
+        for item in ItemId::ALL {
             if item.max_durability().is_some() {
                 assert_eq!(item.max_stack(), 1, "{item:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn structures_round_trip_to_items() {
+        for item in ItemId::ALL {
+            if let Some(kind) = item.structure() {
+                assert_eq!(kind.item(), item);
             }
         }
     }
